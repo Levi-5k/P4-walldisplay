@@ -31,6 +31,8 @@ The selected S3 board is Waveshare `ESP32-S3-Relay-1CH`, SKU `32152`, Part No. `
 - S3 bridge RX line limit: 1536 bytes by default.
 - Poll cadence: P4 sends `{"v":true}` every 5 seconds.
 - Online timeout: P4 marks WLED stale after 30 seconds without a valid response.
+- The S3 bridge now treats the P4 poll/request stream as the primary link heartbeat. After it sees a valid P4 JSON frame, it stops sending periodic unsolicited snapshots and only responds to P4 requests/commands, preventing half-duplex collisions with the 5-second poll cadence. If the P4 goes stale for 30 seconds, the bridge returns to low-rate reconnect announcements every 15 seconds, only after the RS-485 bus has been quiet.
+- The S3 bridge drives RS-485 DE with a short settle/hold delay around each transmitted line and discards partial RX lines after 1.2 seconds of idle time. Oversized lines are dropped until newline so one bad frame cannot repeatedly collide with new traffic.
 
 ## State Commands From P4
 
@@ -47,8 +49,11 @@ These JSON keys must be accepted by the S3 bridge and forwarded into WLED's stat
 | `seg[0].pal` | 0..255 | Lights palette previous/next controls | Segment palette ID. |
 | `seg[0].sx` | 0..255 | Lights speed slider | Effect speed. |
 | `seg[0].ix` | 0..255 | Lights intensity slider | Effect intensity. |
-| `seg[0].col` | up to three RGB triples, each channel 0..255 | Readback-supported; future color controls | Segment color slots. |
-| `ps` | WLED preset ID; current UI sends `1..16` | Lights preset grid | Apply a saved WLED preset. |
+| `seg[0].c1` | 0..255 | Lights effect parameter controls | WLED effect custom slider 1. |
+| `seg[0].c2` | 0..255 | Lights effect parameter controls | WLED effect custom slider 2. |
+| `seg[0].c3` | 0..255 | Lights effect parameter controls | WLED effect custom slider 3. |
+| `seg[0].col` | up to three RGB triples, each channel 0..255 | Lights primary and secondary color controls | Segment color slots; P4 currently edits `col[0]` and `col[1]` while preserving `col[2]` from readback. |
+| `ps` | WLED preset ID; current UI sends `1..64` | Lights preset strip/grid | Apply a saved WLED preset. |
 | `rb` | boolean; current UI sends `true` | Settings > WLED > Reboot S3 | Reboot the WLED node. |
 
 Example state update emitted by the P4 LED state publisher:
@@ -64,6 +69,10 @@ Example direct controls from the Lights page:
 {"seg":[{"pal":5}]}
 {"seg":[{"sx":180}]}
 {"seg":[{"ix":96}]}
+{"seg":[{"c1":64}]}
+{"seg":[{"c2":128}]}
+{"seg":[{"c3":16}]}
+{"seg":[{"col":[[255,64,0],[0,64,255],[0,0,0]]}]}
 {"ps":3}
 ```
 
@@ -112,8 +121,11 @@ The P4 polls with `{"v":true}` and parses these response fields. The S3 bridge i
 | `state.seg[0].pal` | 0..255 | Lights page palette label and next/previous baseline. |
 | `state.seg[0].sx` | 0..255 | Lights page speed slider sync. |
 | `state.seg[0].ix` | 0..255 | Lights page intensity slider sync. |
+| `state.seg[0].c1` | 0..255 | Lights page custom slider 1 sync. |
+| `state.seg[0].c2` | 0..255 | Lights page custom slider 2 sync. |
+| `state.seg[0].c3` | 0..255 | Lights page custom slider 3 sync. |
 | `state.seg[0].cct` | 0..255 | Segment color temperature readback. |
-| `state.seg[0].col` | up to three RGB triples | Future color UI/readback. |
+| `state.seg[0].col` | up to three RGB triples | Primary/secondary color UI readback. |
 | `info.ver` | string, stored in 24-byte P4 buffer | Info and Settings WLED status. |
 | `info.leds.count` | integer, stored as `uint16_t` | Info and Settings WLED status. |
 | `info.uptime` | seconds | Info/readback state. |
@@ -122,6 +134,12 @@ The P4 polls with `{"v":true}` and parses these response fields. The S3 bridge i
 | `info.psu.ready` | boolean | Whether the usermod owns the relay pin and can drive it. |
 | `info.psu.pendingOff` | boolean | Relay is holding power on after WLED went dark. |
 | `info.psu.fault` | boolean | Relay pin allocation/configuration failed. |
+| `info.rs485.online` | boolean | S3-side view of whether the P4 has sent a valid frame within the link timeout. |
+| `info.rs485.seen` | boolean | Whether the S3 has ever seen a valid P4 frame since boot. |
+| `info.rs485.rx` | integer | Count of valid/attempted complete RS-485 JSON lines received by the S3 bridge. |
+| `info.rs485.err` | integer | Count of parse, unsupported command, line timeout, or overflow errors seen by the S3 bridge. |
+| `info.rs485.tx` | integer | Count of compact snapshots transmitted by the S3 bridge. |
+| `info.rs485.ageMs` | integer | Milliseconds since the last valid P4 frame, from the S3 bridge's perspective. |
 
 ## P4 Local Settings That Affect WLED
 

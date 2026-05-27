@@ -6,6 +6,7 @@
 #include "wled_state.h"
 #include "weather/weather_api.h"
 
+#include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_check.h"
 #include "esp_event.h"
@@ -945,18 +946,25 @@ esp_err_t services_reset_wifi_link(void)
 #else
     ESP_LOGW(TAG, "Resetting SDIO/WiFi link (C6 coprocessor will reboot)");
 
-    /* ── Tear down ── */
-    s_wifi_auto_connect_enabled = false;   /* prevent event handler reconnect */
-    (void)esp_wifi_disconnect();
-    vTaskDelay(pdMS_TO_TICKS(200));
-    (void)esp_wifi_stop();
-    s_wifi_started = false;
-    (void)esp_wifi_deinit();
-    s_wifi_initialized = false;
+    /* ── Kill the C6 immediately via GPIO reset ──
+     * Pull the reset pin LOW *before* any SDIO teardown.  This stops
+     * the SDIO slave instantly so the degraded host driver cannot send
+     * traffic that triggers "Unrecoverable host sdio state".         */
+    s_wifi_auto_connect_enabled = false;
+    gpio_set_level(BSP_C6_RST, 0);        /* hold C6 in reset (active-high EN) */
+    ESP_LOGI(TAG, "C6 reset pin pulled LOW, waiting for SDIO bus idle");
+    vTaskDelay(pdMS_TO_TICKS(100));
 
-    (void)esp_hosted_deinit();             /* tears down SDIO transport */
+    /* ── Tear down host-side drivers (slave is dead, no SDIO traffic) ── */
+    (void)esp_hosted_deinit();             /* clean up host SDIO driver */
     s_hosted_initialized = false;
-    vTaskDelay(pdMS_TO_TICKS(500));
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    /* WiFi deinit after transport is down — no SDIO commands possible */
+    (void)esp_wifi_deinit();
+    s_wifi_started = false;
+    s_wifi_initialized = false;
+    vTaskDelay(pdMS_TO_TICKS(200));
 
     /* ── Rebuild ── wifi_driver_prepare re-inits hosted (which resets the
      * C6 via GPIO 54) and the WiFi driver with all guards.               */
@@ -1400,7 +1408,13 @@ static void wled_state_reconcile(const wled_state_t *ws, void *user)
     bool power = ws->on;
     uint8_t bri_pct = (uint8_t)(((uint32_t)ws->bri * 100u + 127u) / 255u);
 
-    if (current.power != power) led_state_set_power(power);
+    if (current.power != power) {
+        if (!power && led_state_power_on_hold_active()) {
+            ESP_LOGD(TAG, "holding idle wake lights on despite WLED off snapshot");
+        } else {
+            led_state_set_power(power);
+        }
+    }
     if (current.brightness_pct != bri_pct) led_state_set_brightness(bri_pct);
 }
 

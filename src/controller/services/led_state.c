@@ -2,6 +2,7 @@
 #include "backlight_pwm.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -15,6 +16,18 @@ static const char *NVS_NS  = "leds";
 static led_state_t s;
 static struct { led_state_cb_t cb; void *user; } subs[MAX_SUBS];
 static int sub_count;
+static bool s_power_on_hold;
+static uint32_t s_power_on_hold_until_ms;
+
+static uint32_t now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+
+static bool time_reached(uint32_t now, uint32_t deadline)
+{
+    return (int32_t)(now - deadline) >= 0;
+}
 
 static void notify(void)
 {
@@ -72,9 +85,33 @@ void led_state_get(led_state_t *out) { *out = s; }
 
 void led_state_set_power(bool on)
 {
+    if (!on) led_state_clear_power_on_hold();
     if (s.power == on) return;
     s.power = on;
     notify();
+}
+
+void led_state_hold_power_on_for(uint32_t duration_ms)
+{
+    s_power_on_hold = true;
+    s_power_on_hold_until_ms = duration_ms ? now_ms() + duration_ms : 0;
+}
+
+void led_state_clear_power_on_hold(void)
+{
+    s_power_on_hold = false;
+    s_power_on_hold_until_ms = 0;
+}
+
+bool led_state_power_on_hold_active(void)
+{
+    if (!s_power_on_hold) return false;
+    if (!s_power_on_hold_until_ms) return true;
+    if (time_reached(now_ms(), s_power_on_hold_until_ms)) {
+        led_state_clear_power_on_hold();
+        return false;
+    }
+    return true;
 }
 
 void led_state_set_brightness(uint8_t pct)

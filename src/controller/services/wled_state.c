@@ -74,6 +74,9 @@ void wled_state_parse_json(const char *json, size_t len)
                 s_state.seg0_pal = (uint8_t)json_int(seg0, "pal", s_state.seg0_pal);
                 s_state.seg0_sx  = (uint8_t)json_int(seg0, "sx", s_state.seg0_sx);
                 s_state.seg0_ix  = (uint8_t)json_int(seg0, "ix", s_state.seg0_ix);
+                s_state.seg0_c1  = (uint8_t)json_int(seg0, "c1", s_state.seg0_c1);
+                s_state.seg0_c2  = (uint8_t)json_int(seg0, "c2", s_state.seg0_c2);
+                s_state.seg0_c3  = (uint8_t)json_int(seg0, "c3", s_state.seg0_c3);
                 s_state.seg0_cct = (uint8_t)json_int(seg0, "cct", s_state.seg0_cct);
 
                 cJSON *col_arr = cJSON_GetObjectItem(seg0, "col");

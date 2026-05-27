@@ -13,6 +13,7 @@ idf_component_register(
         "controller/ui/display_bsp.c"
         "controller/ui/ui_init.c"
         "controller/ui/theme.c"
+        "controller/ui/wled_effect_catalog.c"
         "controller/ui/ui_background.c"
         "controller/ui/jpeg_conv.c"
         "controller/ui/screens.c"

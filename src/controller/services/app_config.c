@@ -257,6 +257,7 @@ void app_config_tuning_defaults(app_tuning_config_t *out)
     out->weather_page_update_s = 1;
     out->wled_poll_s = 5;
     out->wled_stale_s = 30;
+    out->auto_brightness_enabled = false;
     out->auto_brightness_min_pct = 5;
     out->auto_brightness_max_pct = 100;
     out->auto_brightness_eval_s = 60;
@@ -264,6 +265,9 @@ void app_config_tuning_defaults(app_tuning_config_t *out)
     out->auto_brightness_hold_min = 10;
     out->low_brightness_warn_pct = 20;
     out->idle_check_s = 1;
+    out->idle_dismiss_lights_on = false;
+    out->idle_dismiss_lights_timer_on = false;
+    out->idle_dismiss_lights_timer_min = 30;
     out->status_bar_update_s = 1;
     out->toast_duration_ms = 1600;
 }
@@ -282,6 +286,7 @@ static void app_config_tuning_clamp(app_tuning_config_t *cfg)
     cfg->wled_poll_s = clamp_u8(cfg->wled_poll_s, 2, 30);
     cfg->wled_stale_s = clamp_u8(cfg->wled_stale_s, 10, 120);
     if (cfg->wled_stale_s < cfg->wled_poll_s * 2) cfg->wled_stale_s = cfg->wled_poll_s * 2;
+    cfg->auto_brightness_enabled = cfg->auto_brightness_enabled ? true : false;
     cfg->auto_brightness_min_pct = clamp_u8(cfg->auto_brightness_min_pct, 1, 60);
     cfg->auto_brightness_max_pct = clamp_u8(cfg->auto_brightness_max_pct, 20, 100);
     if (cfg->auto_brightness_max_pct < cfg->auto_brightness_min_pct + 5) {
@@ -292,6 +297,9 @@ static void app_config_tuning_clamp(app_tuning_config_t *cfg)
     cfg->auto_brightness_hold_min = clamp_u16(cfg->auto_brightness_hold_min, 1, 60);
     cfg->low_brightness_warn_pct = clamp_u8(cfg->low_brightness_warn_pct, 1, 50);
     cfg->idle_check_s = clamp_u8(cfg->idle_check_s, 1, 10);
+    cfg->idle_dismiss_lights_on = cfg->idle_dismiss_lights_on ? true : false;
+    cfg->idle_dismiss_lights_timer_on = cfg->idle_dismiss_lights_timer_on ? true : false;
+    cfg->idle_dismiss_lights_timer_min = clamp_u16(cfg->idle_dismiss_lights_timer_min, 1, 240);
     cfg->status_bar_update_s = clamp_u8(cfg->status_bar_update_s, 1, 10);
     cfg->toast_duration_ms = clamp_u16(cfg->toast_duration_ms, 800, 5000);
 }
@@ -318,6 +326,7 @@ esp_err_t app_config_tuning_load(app_tuning_config_t *out)
     if (nvs_get_u8(h, "wx_ui", &u8) == ESP_OK) out->weather_page_update_s = u8;
     if (nvs_get_u8(h, "wl_poll", &u8) == ESP_OK) out->wled_poll_s = u8;
     if (nvs_get_u8(h, "wl_stale", &u8) == ESP_OK) out->wled_stale_s = u8;
+    if (nvs_get_u8(h, "bl_auto", &u8) == ESP_OK) out->auto_brightness_enabled = u8 != 0;
     if (nvs_get_u8(h, "bl_min", &u8) == ESP_OK) out->auto_brightness_min_pct = u8;
     if (nvs_get_u8(h, "bl_max", &u8) == ESP_OK) out->auto_brightness_max_pct = u8;
     if (nvs_get_u16(h, "bl_eval", &u16) == ESP_OK) out->auto_brightness_eval_s = u16;
@@ -325,6 +334,9 @@ esp_err_t app_config_tuning_load(app_tuning_config_t *out)
     if (nvs_get_u16(h, "bl_hold", &u16) == ESP_OK) out->auto_brightness_hold_min = u16;
     if (nvs_get_u8(h, "bl_warn", &u8) == ESP_OK) out->low_brightness_warn_pct = u8;
     if (nvs_get_u8(h, "idle_chk", &u8) == ESP_OK) out->idle_check_s = u8;
+    if (nvs_get_u8(h, "idle_wlon", &u8) == ESP_OK) out->idle_dismiss_lights_on = u8 != 0;
+    if (nvs_get_u8(h, "idle_wlt_on", &u8) == ESP_OK) out->idle_dismiss_lights_timer_on = u8 != 0;
+    if (nvs_get_u16(h, "idle_wlt_min", &u16) == ESP_OK) out->idle_dismiss_lights_timer_min = u16;
     if (nvs_get_u8(h, "stat_upd", &u8) == ESP_OK) out->status_bar_update_s = u8;
     if (nvs_get_u16(h, "toast_ms", &u16) == ESP_OK) out->toast_duration_ms = u16;
     nvs_close(h);
@@ -354,6 +366,7 @@ esp_err_t app_config_tuning_save(const app_tuning_config_t *cfg)
     if (err == ESP_OK) err = nvs_set_u8(h, "wx_ui", clean.weather_page_update_s);
     if (err == ESP_OK) err = nvs_set_u8(h, "wl_poll", clean.wled_poll_s);
     if (err == ESP_OK) err = nvs_set_u8(h, "wl_stale", clean.wled_stale_s);
+    if (err == ESP_OK) err = nvs_set_u8(h, "bl_auto", clean.auto_brightness_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u8(h, "bl_min", clean.auto_brightness_min_pct);
     if (err == ESP_OK) err = nvs_set_u8(h, "bl_max", clean.auto_brightness_max_pct);
     if (err == ESP_OK) err = nvs_set_u16(h, "bl_eval", clean.auto_brightness_eval_s);
@@ -361,6 +374,9 @@ esp_err_t app_config_tuning_save(const app_tuning_config_t *cfg)
     if (err == ESP_OK) err = nvs_set_u16(h, "bl_hold", clean.auto_brightness_hold_min);
     if (err == ESP_OK) err = nvs_set_u8(h, "bl_warn", clean.low_brightness_warn_pct);
     if (err == ESP_OK) err = nvs_set_u8(h, "idle_chk", clean.idle_check_s);
+    if (err == ESP_OK) err = nvs_set_u8(h, "idle_wlon", clean.idle_dismiss_lights_on ? 1 : 0);
+    if (err == ESP_OK) err = nvs_set_u8(h, "idle_wlt_on", clean.idle_dismiss_lights_timer_on ? 1 : 0);
+    if (err == ESP_OK) err = nvs_set_u16(h, "idle_wlt_min", clean.idle_dismiss_lights_timer_min);
     if (err == ESP_OK) err = nvs_set_u8(h, "stat_upd", clean.status_bar_update_s);
     if (err == ESP_OK) err = nvs_set_u16(h, "toast_ms", clean.toast_duration_ms);
     if (err == ESP_OK) err = nvs_commit(h);
@@ -392,6 +408,7 @@ esp_err_t app_config_theme_load(app_theme_config_t *out)
     uint8_t u8 = 0;
     uint16_t u16 = 0;
     if (nvs_get_u8(h, "bg_en", &u8) == ESP_OK) out->background_enabled = u8 != 0;
+    if (nvs_get_u8(h, "bg_idle", &u8) == ESP_OK) out->background_idle_only = u8 != 0;
     if (nvs_get_u8(h, "surface", &u8) == ESP_OK) out->surface_opacity_pct = clamp_u8(u8, 35, 100);
     if (nvs_get_u8(h, "dim", &u8) == ESP_OK) out->background_dim_pct = clamp_u8(u8, 0, 95);
     if (nvs_get_u16(h, "slide", &u16) == ESP_OK) {
@@ -442,6 +459,7 @@ esp_err_t app_config_theme_save(const app_theme_config_t *cfg)
     uint8_t next = cfg->next_slot % APP_THEME_MAX_IMAGES;
 
     err = nvs_set_u8(h, "bg_en", cfg->background_enabled ? 1 : 0);
+    if (err == ESP_OK) err = nvs_set_u8(h, "bg_idle", cfg->background_idle_only ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u8(h, "surface", surface);
     if (err == ESP_OK) err = nvs_set_u8(h, "dim", dim);
     if (err == ESP_OK) err = nvs_set_u16(h, "slide", slide);

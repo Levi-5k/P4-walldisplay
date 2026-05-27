@@ -17,6 +17,9 @@ typedef struct {
     uint8_t  seg0_pal;
     uint8_t  seg0_sx;
     uint8_t  seg0_ix;
+    uint8_t  seg0_c1;
+    uint8_t  seg0_c2;
+    uint8_t  seg0_c3;
     uint8_t  seg0_cct;
     uint8_t  seg0_col[3][3];
 

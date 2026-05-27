@@ -26,6 +26,26 @@
 #define USERMOD_86BOX_RS485_STATUS_INTERVAL_MS 15000UL
 #endif
 
+#ifndef USERMOD_86BOX_RS485_LINK_TIMEOUT_MS
+#define USERMOD_86BOX_RS485_LINK_TIMEOUT_MS 30000UL
+#endif
+
+#ifndef USERMOD_86BOX_RS485_RX_IDLE_RESET_MS
+#define USERMOD_86BOX_RS485_RX_IDLE_RESET_MS 1200UL
+#endif
+
+#ifndef USERMOD_86BOX_RS485_BUS_QUIET_MS
+#define USERMOD_86BOX_RS485_BUS_QUIET_MS 75UL
+#endif
+
+#ifndef USERMOD_86BOX_RS485_TX_SETTLE_US
+#define USERMOD_86BOX_RS485_TX_SETTLE_US 200U
+#endif
+
+#ifndef USERMOD_86BOX_RS485_TX_HOLD_US
+#define USERMOD_86BOX_RS485_TX_HOLD_US 200U
+#endif
+
 #ifndef USERMOD_86BOX_PSU_RELAY_PIN
 #define USERMOD_86BOX_PSU_RELAY_PIN 47
 #endif
@@ -55,7 +75,16 @@ private:
   HardwareSerial bridgeSerial;
   String lineBuffer;
   unsigned long lastStatusMs = 0;
+  unsigned long lastRxByteMs = 0;
+  unsigned long lastValidRxMs = 0;
+  unsigned long lastTxMs = 0;
   bool serialReady = false;
+  bool lineOverflow = false;
+  bool p4LinkSeen = false;
+  bool p4LinkOnline = false;
+  uint32_t rxLineCount = 0;
+  uint32_t rxErrorCount = 0;
+  uint32_t txSnapshotCount = 0;
 
   int8_t psuRelayPin = USERMOD_86BOX_PSU_RELAY_PIN;
   bool psuRelayEnabled = USERMOD_86BOX_PSU_RELAY_ENABLED;
@@ -74,6 +103,34 @@ private:
   static bool elapsed(unsigned long since, unsigned long interval)
   {
     return millis() - since >= interval;
+  }
+
+  bool busQuietFor(unsigned long interval) const
+  {
+    unsigned long now = millis();
+    if (lastRxByteMs != 0 && now - lastRxByteMs < interval) return false;
+    if (lastTxMs != 0 && now - lastTxMs < interval) return false;
+    return true;
+  }
+
+  void noteValidP4Frame()
+  {
+    lastValidRxMs = millis();
+    p4LinkSeen = true;
+    p4LinkOnline = true;
+  }
+
+  void serviceRs485LinkState()
+  {
+    if (lineBuffer.length() > 0 && lastRxByteMs != 0 && elapsed(lastRxByteMs, USERMOD_86BOX_RS485_RX_IDLE_RESET_MS)) {
+      lineBuffer = "";
+      lineOverflow = false;
+      rxErrorCount++;
+    }
+
+    if (p4LinkOnline && lastValidRxMs != 0 && elapsed(lastValidRxMs, USERMOD_86BOX_RS485_LINK_TIMEOUT_MS)) {
+      p4LinkOnline = false;
+    }
   }
 
   static bool jsonTruthy(JsonVariant value, bool fallback)
@@ -238,10 +295,13 @@ private:
   {
     if (!serialReady) return;
     setTransmitMode(true);
+    if (USERMOD_86BOX_RS485_TX_SETTLE_US > 0) delayMicroseconds(USERMOD_86BOX_RS485_TX_SETTLE_US);
     serializeJson(doc, bridgeSerial);
     bridgeSerial.print('\n');
     bridgeSerial.flush();
+    if (USERMOD_86BOX_RS485_TX_HOLD_US > 0) delayMicroseconds(USERMOD_86BOX_RS485_TX_HOLD_US);
     setTransmitMode(false);
+    lastTxMs = millis();
   }
 
   void sendError(const __FlashStringHelper *detail)
@@ -271,6 +331,9 @@ private:
     copyJsonValue(targetSegment, sourceSegment, "pal");
     copyJsonValue(targetSegment, sourceSegment, "sx");
     copyJsonValue(targetSegment, sourceSegment, "ix");
+    copyJsonValue(targetSegment, sourceSegment, "c1");
+    copyJsonValue(targetSegment, sourceSegment, "c2");
+    copyJsonValue(targetSegment, sourceSegment, "c3");
     copyJsonValue(targetSegment, sourceSegment, "cct");
 
     JsonArray sourceColors = sourceSegment[F("col")].as<JsonArray>();
@@ -313,6 +376,14 @@ private:
     targetRelay[F("ready")] = psuRelayReady;
     targetRelay[F("pendingOff")] = psuRelayOffPending;
     targetRelay[F("fault")] = psuRelayFault;
+
+    JsonObject targetBridge = targetInfo.createNestedObject(F("rs485"));
+    targetBridge[F("online")] = p4LinkOnline;
+    targetBridge[F("seen")] = p4LinkSeen;
+    targetBridge[F("rx")] = rxLineCount;
+    targetBridge[F("err")] = rxErrorCount;
+    targetBridge[F("tx")] = txSnapshotCount;
+    targetBridge[F("ageMs")] = lastValidRxMs ? (uint32_t)(millis() - lastValidRxMs) : 0;
   }
 
   void sendStateSnapshot()
@@ -323,8 +394,9 @@ private:
     serializeState(fullState);
     serializeInfo(fullInfo);
 
-    StaticJsonDocument<1024> compact;
+    StaticJsonDocument<1280> compact;
     buildCompactSnapshot(compact, fullState, fullInfo);
+    txSnapshotCount++;
     writeJsonDocument(compact);
     lastStatusMs = millis();
   }
@@ -348,18 +420,23 @@ private:
 
   void handleLine(const String &line)
   {
+    rxLineCount++;
     DynamicJsonDocument doc(3072);
     DeserializationError error = deserializeJson(doc, line);
     if (error) {
+      rxErrorCount++;
       sendError(F("json_parse_failed"));
       return;
     }
 
     JsonObject root = doc.as<JsonObject>();
     if (root.isNull()) {
+      rxErrorCount++;
       sendError(F("json_object_required"));
       return;
     }
+
+    noteValidP4Frame();
 
     if (root[F("v")] == true) {
       sendStateSnapshot();
@@ -379,13 +456,21 @@ private:
     if (changed) {
       sendStateSnapshot();
     } else {
+      rxErrorCount++;
       sendError(F("unsupported_command"));
     }
   }
 
   void consumeByte(char receivedByte)
   {
+    lastRxByteMs = millis();
     if (receivedByte == '\n' || receivedByte == '\r') {
+      if (lineOverflow) {
+        lineOverflow = false;
+        lineBuffer = "";
+        sendError(F("line_too_long"));
+        return;
+      }
       if (lineBuffer.length() > 0) {
         handleLine(lineBuffer);
         lineBuffer = "";
@@ -395,9 +480,11 @@ private:
 
     if (lineBuffer.length() >= USERMOD_86BOX_RS485_LINE_MAX) {
       lineBuffer = "";
-      sendError(F("line_too_long"));
+      lineOverflow = true;
+      rxErrorCount++;
       return;
     }
+    if (lineOverflow) return;
     lineBuffer += receivedByte;
   }
 
@@ -422,20 +509,22 @@ public:
   void loop() override
   {
     servicePsuRelay();
+    serviceRs485LinkState();
 
     while (serialReady && bridgeSerial.available() > 0) {
       int received = bridgeSerial.read();
       if (received >= 0) consumeByte((char)received);
     }
 
-    if (serialReady && millis() - lastStatusMs > USERMOD_86BOX_RS485_STATUS_INTERVAL_MS) {
+    if (serialReady && !p4LinkOnline && elapsed(lastStatusMs, USERMOD_86BOX_RS485_STATUS_INTERVAL_MS) &&
+        busQuietFor(USERMOD_86BOX_RS485_BUS_QUIET_MS)) {
       sendStateSnapshot();
     }
   }
 
   void connected() override
   {
-    sendStateSnapshot();
+    lastStatusMs = 0;
   }
 
   void addToJsonInfo(JsonObject &root) override
@@ -452,6 +541,14 @@ public:
 
     JsonArray bridgeInfo = usermodsInfo.createNestedArray(F("86Box RS485"));
     bridgeInfo.add(detail);
+
+    char linkDetail[96];
+    snprintf(linkDetail, sizeof(linkDetail), "%s, rx %lu, err %lu, tx %lu",
+         p4LinkOnline ? "P4 online" : (p4LinkSeen ? "P4 stale" : "waiting for P4"),
+         (unsigned long)rxLineCount,
+         (unsigned long)rxErrorCount,
+         (unsigned long)txSnapshotCount);
+    bridgeInfo.add(linkDetail);
 
     char relayDetail[96];
     if (!psuRelayEnabled || psuRelayPin < 0) {

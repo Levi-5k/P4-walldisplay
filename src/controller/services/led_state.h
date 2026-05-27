@@ -36,6 +36,10 @@ void led_state_set_power(bool on);
 void led_state_set_brightness(uint8_t pct);
 void led_state_set_kelvin(uint16_t k);
 
+void led_state_hold_power_on_for(uint32_t duration_ms);
+void led_state_clear_power_on_hold(void);
+bool led_state_power_on_hold_active(void);
+
 void led_state_set_kelvin_min(uint16_t k_min);
 void led_state_set_kelvin_max(uint16_t k_max);
 void led_state_set_screen_timeout(uint16_t sec);

@@ -34,6 +34,7 @@ typedef struct {
     uint8_t weather_page_update_s;
     uint8_t wled_poll_s;
     uint8_t wled_stale_s;
+    bool auto_brightness_enabled;
     uint8_t auto_brightness_min_pct;
     uint8_t auto_brightness_max_pct;
     uint16_t auto_brightness_eval_s;
@@ -41,6 +42,9 @@ typedef struct {
     uint16_t auto_brightness_hold_min;
     uint8_t low_brightness_warn_pct;
     uint8_t idle_check_s;
+    bool idle_dismiss_lights_on;
+    bool idle_dismiss_lights_timer_on;
+    uint16_t idle_dismiss_lights_timer_min;
     uint8_t status_bar_update_s;
     uint16_t toast_duration_ms;
 } app_tuning_config_t;
@@ -50,6 +54,7 @@ typedef struct {
 typedef struct {
     bool configured;
     bool background_enabled;
+    bool background_idle_only;
     uint8_t surface_opacity_pct;
     uint8_t background_dim_pct;
     uint16_t slideshow_seconds;

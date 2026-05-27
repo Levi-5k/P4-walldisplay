@@ -10,6 +10,7 @@
 #include "theme.h"
 #include "toast.h"
 #include "ui_background.h"
+#include "wled_effect_catalog.h"
 #include "app_config.h"
 #include "audio_fft.h"
 #include "audio_in.h"
@@ -39,6 +40,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#if LV_USE_QRCODE
+#include "libs/qrcode/qrcodegen.h"
+#endif
+
 #include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
@@ -49,6 +54,7 @@
 #include <unistd.h>
 
 static const char *TAG = "screens";
+static const char *WLED_WEB_URL = "http://wled-86box.local";
 
 /* ---------- primitives ---------- */
 
@@ -74,6 +80,81 @@ static lv_obj_t *deep_card(lv_obj_t *parent)
     lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
     return c;
 }
+
+static lv_obj_t *wled_qr_placeholder_create(lv_obj_t *parent)
+{
+    lv_obj_t *qr = lv_obj_create(parent);
+    lv_obj_remove_style_all(qr);
+    lv_obj_set_size(qr, 168, 168);
+    lv_obj_set_style_bg_opa(qr, LV_OPA_20, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(qr, THEME_SURFACE_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_border_color(qr, THEME_BORDER_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_border_width(qr, 1, LV_PART_MAIN);
+    lv_obj_set_style_radius(qr, 8, LV_PART_MAIN);
+    lv_obj_clear_flag(qr, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_CLICK_FOCUSABLE);
+
+    lv_obj_t *qr_unavailable = lv_label_create(qr);
+    lv_label_set_text(qr_unavailable, LV_SYMBOL_WARNING);
+    lv_obj_set_style_text_color(qr_unavailable, THEME_TEXT_MUTED, LV_PART_MAIN);
+    lv_obj_set_style_text_font(qr_unavailable, THEME_FONT_BODY, LV_PART_MAIN);
+    lv_obj_center(qr_unavailable);
+    return qr;
+}
+
+#if LV_USE_QRCODE
+static lv_obj_t *wled_qr_grid_create(lv_obj_t *parent, const char *url)
+{
+    if (!url || !url[0]) return NULL;
+
+    static uint8_t qr[qrcodegen_BUFFER_LEN_MAX];
+    static uint8_t temp[qrcodegen_BUFFER_LEN_MAX];
+    bool ok = qrcodegen_encodeText(url, temp, qr, qrcodegen_Ecc_MEDIUM,
+                                   qrcodegen_VERSION_MIN, qrcodegen_VERSION_MAX,
+                                   qrcodegen_Mask_AUTO, true);
+    if (!ok) return NULL;
+
+    const int32_t qr_px = 168;
+    const int32_t quiet_modules = 4;
+    int32_t qr_modules = qrcodegen_getSize(qr);
+    if (qr_modules <= 0) return NULL;
+
+    int32_t total_modules = qr_modules + quiet_modules * 2;
+    int32_t module_px = qr_px / total_modules;
+    if (module_px < 1) return NULL;
+    int32_t offset = (qr_px - total_modules * module_px) / 2 + quiet_modules * module_px;
+
+    lv_obj_t *box = lv_obj_create(parent);
+    lv_obj_remove_style_all(box);
+    lv_obj_set_size(box, qr_px, qr_px);
+    lv_obj_set_style_bg_color(box, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(box, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_border_width(box, 8, LV_PART_MAIN);
+    lv_obj_set_style_radius(box, 8, LV_PART_MAIN);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_CLICK_FOCUSABLE);
+
+    for (int32_t y = 0; y < qr_modules; y++) {
+        int32_t run_start = -1;
+        for (int32_t x = 0; x <= qr_modules; x++) {
+            bool black = x < qr_modules && qrcodegen_getModule(qr, x, y);
+            if (black && run_start < 0) {
+                run_start = x;
+            } else if (!black && run_start >= 0) {
+                lv_obj_t *bar = lv_obj_create(box);
+                lv_obj_remove_style_all(bar);
+                lv_obj_set_style_bg_color(bar, lv_color_hex(0x0B1020), LV_PART_MAIN);
+                lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
+                lv_obj_set_pos(bar, offset + run_start * module_px, offset + y * module_px);
+                lv_obj_set_size(bar, (x - run_start) * module_px, module_px);
+                lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_CLICK_FOCUSABLE);
+                run_start = -1;
+            }
+        }
+    }
+
+    return box;
+}
+#endif
 
 /* Map a Kelvin value to a tint roughly approximating black-body color:
  * warm (2000 K) → orange, neutral (4000 K) → white, cool (6500 K) → blue.
@@ -178,36 +259,48 @@ static void arc_color_set_if_changed(lv_obj_t *obj, lv_part_t part, lv_color_t c
  * LIGHTS PAGE
  * ============================================================ */
 
+#define LIGHTS_PRESET_COUNT 64
+#define LIGHTS_COLOR_SLOT_PRIMARY 0
+#define LIGHTS_COLOR_SLOT_SECONDARY 1
+
 static lv_obj_t *s_power_btn;
 static lv_obj_t *s_power_icon;
 static lv_obj_t *s_power_status;
 static lv_obj_t *s_bri_slider;
 static lv_obj_t *s_color_slider;
+static lv_obj_t *s_secondary_color_slider;
 static lv_obj_t *s_kel_slider;
 static lv_obj_t *s_kel_arc;
 static lv_obj_t *s_bri_label;
 static lv_obj_t *s_color_label;
+static lv_obj_t *s_secondary_color_label;
 static lv_obj_t *s_kel_label;
 static lv_obj_t *s_arc_kel_label;
 static lv_obj_t *s_fx_label;
 static lv_obj_t *s_pal_label;
-static lv_obj_t *s_speed_slider;
-static lv_obj_t *s_intensity_slider;
-static lv_obj_t *s_preset_btns[16];
+static lv_obj_t *s_effect_dropdown;
+static lv_obj_t *s_effect_param_rows[WLED_EFFECT_PARAM_COUNT];
+static lv_obj_t *s_effect_param_labels[WLED_EFFECT_PARAM_COUNT];
+static lv_obj_t *s_effect_param_sliders[WLED_EFFECT_PARAM_COUNT];
+static lv_obj_t *s_effect_param_value_labels[WLED_EFFECT_PARAM_COUNT];
+static lv_obj_t *s_preset_btns[LIGHTS_PRESET_COUNT];
 static lv_obj_t *s_lights_root;
 static lv_obj_t *s_lights_home_page;
 static lv_obj_t *s_lights_effects_page;
 static lv_obj_t *s_lights_presets_page;
+static lv_obj_t *s_lights_status_card;
 static lv_obj_t *s_lights_wled_status;
 static lv_obj_t *s_lights_wled_detail;
 static uint32_t s_bri_update_ms;
 static uint32_t s_color_update_ms;
+static uint32_t s_secondary_color_update_ms;
 static uint32_t s_kel_update_ms;
-static uint32_t s_speed_update_ms;
-static uint32_t s_intensity_update_ms;
+static uint32_t s_effect_param_update_ms[WLED_EFFECT_PARAM_COUNT];
 
 static bool s_ui_updating;   /* guard against feedback loops */
 static bool s_skip_lights_sync;
+static volatile bool s_lights_led_dirty;
+static volatile bool s_lights_wled_dirty;
 
 static void brightness_label_set(uint8_t pct)
 {
@@ -257,18 +350,18 @@ static uint8_t rgb_to_hue(uint8_t r, uint8_t g, uint8_t b)
     return (uint8_t)hue;
 }
 
-static void color_label_set(uint8_t hue)
+static void color_label_set(lv_obj_t *label, uint8_t hue)
 {
     char b[16];
     snprintf(b, sizeof(b), "Hue %u", hue);
-    label_set_text_if_changed(s_color_label, b);
+    label_set_text_if_changed(label, b);
 }
 
-static void color_tint_set(uint8_t hue)
+static void color_tint_set(lv_obj_t *slider, uint8_t hue)
 {
     lv_color_t color = hue_to_color(hue);
-    bg_color_set_if_changed(s_color_slider, LV_PART_INDICATOR, color);
-    bg_color_set_if_changed(s_color_slider, LV_PART_KNOB, color);
+    bg_color_set_if_changed(slider, LV_PART_INDICATOR, color);
+    bg_color_set_if_changed(slider, LV_PART_KNOB, color);
 }
 
 static void kelvin_labels_set(uint16_t kelvin)
@@ -304,34 +397,93 @@ static void apply_power_visual(bool on)
     }
 }
 
-static void lights_wled_state_cb(const wled_state_t *ws, void *user)
+static const char *effect_param_key(size_t index)
 {
-    (void)user;
-    if (!ws || !ws->valid) return;
-    if (s_fx_label) {
-        char fx_text[32];
-        snprintf(fx_text, sizeof(fx_text), "FX %u", ws->seg0_fx);
-        label_set_text_if_changed(s_fx_label, fx_text);
+    static const char *keys[WLED_EFFECT_PARAM_COUNT] = {"sx", "ix", "c1", "c2", "c3"};
+    return index < WLED_EFFECT_PARAM_COUNT ? keys[index] : "sx";
+}
+
+static uint8_t effect_param_value(const wled_state_t *ws, size_t index)
+{
+    if (!ws) return 0;
+    switch (index) {
+    case 0: return ws->seg0_sx;
+    case 1: return ws->seg0_ix;
+    case 2: return ws->seg0_c1;
+    case 3: return ws->seg0_c2;
+    case 4: return ws->seg0_c3;
+    default: return 0;
     }
+}
+
+static void effect_param_value_label_set(size_t index, uint8_t value)
+{
+    if (index >= WLED_EFFECT_PARAM_COUNT) return;
+    char text[8];
+    snprintf(text, sizeof(text), "%u", value);
+    label_set_text_if_changed(s_effect_param_value_labels[index], text);
+}
+
+static void lights_effect_selector_set(uint8_t fx)
+{
+    const wled_effect_catalog_item_t *item = wled_effect_catalog_find(fx);
+    if (s_fx_label) {
+        char text[48];
+        snprintf(text, sizeof(text), "%u  %s", fx, item ? item->name : "Unknown");
+        label_set_text_if_changed(s_fx_label, text);
+    }
+
+    if (s_effect_dropdown) {
+        int index = wled_effect_catalog_index_for_id(fx);
+        if (index >= 0 && lv_dropdown_get_selected(s_effect_dropdown) != (uint16_t)index) {
+            lv_dropdown_set_selected(s_effect_dropdown, (uint16_t)index);
+        }
+    }
+
+    for (size_t i = 0; i < WLED_EFFECT_PARAM_COUNT; i++) {
+        const char *label = item ? item->params[i] : "";
+        if (!label || label[0] == '\0') {
+            if (s_effect_param_rows[i]) lv_obj_add_flag(s_effect_param_rows[i], LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+
+        if (s_effect_param_rows[i]) lv_obj_clear_flag(s_effect_param_rows[i], LV_OBJ_FLAG_HIDDEN);
+        label_set_text_if_changed(s_effect_param_labels[i], label);
+    }
+}
+
+static void lights_apply_wled_state(const wled_state_t *ws)
+{
+    if (!ws || !ws->valid) return;
     if (s_pal_label) {
         char pal_text[32];
         snprintf(pal_text, sizeof(pal_text), "Pal %u", ws->seg0_pal);
         label_set_text_if_changed(s_pal_label, pal_text);
     }
     s_ui_updating = true;
-    uint8_t hue = rgb_to_hue(ws->seg0_col[0][0], ws->seg0_col[0][1], ws->seg0_col[0][2]);
-    slider_set_value_if_changed(s_color_slider, hue);
-    color_label_set(hue);
-    color_tint_set(hue);
-    slider_set_value_if_changed(s_speed_slider, ws->seg0_sx);
-    slider_set_value_if_changed(s_intensity_slider, ws->seg0_ix);
+    lights_effect_selector_set(ws->seg0_fx);
+
+    uint8_t primary_hue = rgb_to_hue(ws->seg0_col[0][0], ws->seg0_col[0][1], ws->seg0_col[0][2]);
+    slider_set_value_if_changed(s_color_slider, primary_hue);
+    color_label_set(s_color_label, primary_hue);
+    color_tint_set(s_color_slider, primary_hue);
+
+    uint8_t secondary_hue = rgb_to_hue(ws->seg0_col[1][0], ws->seg0_col[1][1], ws->seg0_col[1][2]);
+    slider_set_value_if_changed(s_secondary_color_slider, secondary_hue);
+    color_label_set(s_secondary_color_label, secondary_hue);
+    color_tint_set(s_secondary_color_slider, secondary_hue);
+
+    for (size_t i = 0; i < WLED_EFFECT_PARAM_COUNT; i++) {
+        uint8_t value = effect_param_value(ws, i);
+        slider_set_value_if_changed(s_effect_param_sliders[i], value);
+        effect_param_value_label_set(i, value);
+    }
     s_ui_updating = false;
 }
 
-static void lights_state_cb(const led_state_t *s, void *u)
+static void lights_apply_led_state(const led_state_t *s)
 {
-    (void)u;
-    if (s_skip_lights_sync) return;
+    if (!s) return;
     s_ui_updating = true;
     if (s_bri_slider) {
         slider_set_range_if_changed(s_bri_slider, 0, 100);
@@ -352,6 +504,39 @@ static void lights_state_cb(const led_state_t *s, void *u)
     }
     apply_power_visual(s->power);
     s_ui_updating = false;
+}
+
+static void lights_wled_state_cb(const wled_state_t *ws, void *user)
+{
+    (void)ws;
+    (void)user;
+    s_lights_wled_dirty = true;
+}
+
+static void lights_state_cb(const led_state_t *s, void *u)
+{
+    (void)s;
+    (void)u;
+    if (!s_skip_lights_sync) s_lights_led_dirty = true;
+}
+
+static void lights_sync_refresh(lv_timer_t *t)
+{
+    if (timer_page_hidden(t, s_lights_root)) return;
+
+    if (s_lights_led_dirty) {
+        s_lights_led_dirty = false;
+        led_state_t state;
+        led_state_get(&state);
+        lights_apply_led_state(&state);
+    }
+
+    if (s_lights_wled_dirty) {
+        s_lights_wled_dirty = false;
+        wled_state_t ws;
+        wled_state_get(&ws);
+        lights_apply_wled_state(&ws);
+    }
 }
 
 static lv_obj_t *lights_panel_create(lv_obj_t *parent)
@@ -482,22 +667,31 @@ static void lights_status_refresh(lv_timer_t *t)
     wled_state_t ws;
     wled_state_get(&ws);
 
+    if (st.rs485_ready && st.wled_online && ws.valid) {
+        if (s_lights_status_card) lv_obj_add_flag(s_lights_status_card, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        if (s_lights_status_card) lv_obj_clear_flag(s_lights_status_card, LV_OBJ_FLAG_HIDDEN);
+    }
+
     if (!st.rs485_ready) {
         label_set_text_if_changed(s_lights_wled_status, "RS-485 offline");
         label_set_text_if_changed(s_lights_wled_detail, "S3 controller not reachable yet");
     } else if (st.wled_online) {
-        label_set_text_if_changed(s_lights_wled_status, "WLED online");
         if (ws.valid) {
             char detail[96];
+            const wled_effect_catalog_item_t *item = wled_effect_catalog_find(ws.seg0_fx);
+            const char *effect_name = item ? item->name : "FX";
+            label_set_text_if_changed(s_lights_wled_status, "WLED online");
             if (ws.version[0]) {
-                snprintf(detail, sizeof(detail), "v%s  %u LEDs  FX %u  Pal %u",
-                         ws.version, ws.led_count, ws.seg0_fx, ws.seg0_pal);
+                snprintf(detail, sizeof(detail), "v%s  %u LEDs  %s  Pal %u",
+                         ws.version, ws.led_count, effect_name, ws.seg0_pal);
             } else {
-                snprintf(detail, sizeof(detail), "%u LEDs  FX %u  Pal %u",
-                         ws.led_count, ws.seg0_fx, ws.seg0_pal);
+                snprintf(detail, sizeof(detail), "%u LEDs  %s  Pal %u",
+                         ws.led_count, effect_name, ws.seg0_pal);
             }
             label_set_text_if_changed(s_lights_wled_detail, detail);
         } else {
+            label_set_text_if_changed(s_lights_wled_status, "Waiting for WLED state");
             label_set_text_if_changed(s_lights_wled_detail, "Waiting for first state snapshot");
         }
     } else {
@@ -522,7 +716,8 @@ static void fx_prev_clicked(lv_event_t *e)
     (void)e;
     wled_state_t ws;
     wled_state_get(&ws);
-    uint8_t fx = ws.seg0_fx > 0 ? ws.seg0_fx - 1 : 0;
+    uint8_t fx = wled_effect_catalog_adjacent_id(ws.seg0_fx, -1);
+    lights_effect_selector_set(fx);
     char json[48];
     snprintf(json, sizeof(json), "{\"seg\":[{\"fx\":%u}]}", fx);
     cmd_tx_send_json(json);
@@ -533,7 +728,19 @@ static void fx_next_clicked(lv_event_t *e)
     (void)e;
     wled_state_t ws;
     wled_state_get(&ws);
-    uint8_t fx = ws.seg0_fx < 255 ? ws.seg0_fx + 1 : 255;
+    uint8_t fx = wled_effect_catalog_adjacent_id(ws.seg0_fx, 1);
+    lights_effect_selector_set(fx);
+    char json[48];
+    snprintf(json, sizeof(json), "{\"seg\":[{\"fx\":%u}]}", fx);
+    cmd_tx_send_json(json);
+}
+
+static void fx_dropdown_changed(lv_event_t *e)
+{
+    if (s_ui_updating) return;
+    uint16_t index = lv_dropdown_get_selected(lv_event_get_target(e));
+    uint8_t fx = wled_effect_catalog_id_for_index(index);
+    lights_effect_selector_set(fx);
     char json[48];
     snprintf(json, sizeof(json), "{\"seg\":[{\"fx\":%u}]}", fx);
     cmd_tx_send_json(json);
@@ -561,25 +768,17 @@ static void pal_next_clicked(lv_event_t *e)
     cmd_tx_send_json(json);
 }
 
-static void speed_changed(lv_event_t *e)
+static void effect_param_changed(lv_event_t *e)
 {
     if (s_ui_updating) return;
+    size_t index = (size_t)(intptr_t)lv_event_get_user_data(e);
+    if (index >= WLED_EFFECT_PARAM_COUNT) return;
     lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_VALUE_CHANGED && !rate_limit_ms(&s_speed_update_ms, 120)) return;
+    if (code == LV_EVENT_VALUE_CHANGED && !rate_limit_ms(&s_effect_param_update_ms[index], 120)) return;
     int v = lv_slider_get_value(lv_event_get_target(e));
+    effect_param_value_label_set(index, (uint8_t)v);
     char json[48];
-    snprintf(json, sizeof(json), "{\"seg\":[{\"sx\":%d}]}", v);
-    cmd_tx_send_json(json);
-}
-
-static void intensity_changed(lv_event_t *e)
-{
-    if (s_ui_updating) return;
-    lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_VALUE_CHANGED && !rate_limit_ms(&s_intensity_update_ms, 120)) return;
-    int v = lv_slider_get_value(lv_event_get_target(e));
-    char json[48];
-    snprintf(json, sizeof(json), "{\"seg\":[{\"ix\":%d}]}", v);
+    snprintf(json, sizeof(json), "{\"seg\":[{\"%s\":%d}]}", effect_param_key(index), v);
     cmd_tx_send_json(json);
 }
 
@@ -607,21 +806,39 @@ static void bri_changed(lv_event_t *e)
     }
 }
 
-static void color_changed(lv_event_t *e)
+static void color_slot_changed(lv_event_t *e)
 {
     if (s_ui_updating) return;
+    uint8_t slot = (uint8_t)(intptr_t)lv_event_get_user_data(e);
+    if (slot > LIGHTS_COLOR_SLOT_SECONDARY) return;
     lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_VALUE_CHANGED && !rate_limit_ms(&s_color_update_ms, 90)) return;
+    uint32_t *last_ms = slot == LIGHTS_COLOR_SLOT_PRIMARY ? &s_color_update_ms : &s_secondary_color_update_ms;
+    if (code == LV_EVENT_VALUE_CHANGED && !rate_limit_ms(last_ms, 90)) return;
     int v = lv_slider_get_value(lv_event_get_target(e));
-    uint8_t r, g, b;
-    hue_to_rgb((uint8_t)v, &r, &g, &b);
-    char json[80];
-    snprintf(json, sizeof(json), "{\"seg\":[{\"col\":[[%u,%u,%u]]}]}", r, g, b);
+    uint8_t colors[3][3] = {{0}};
+    wled_state_t ws;
+    wled_state_get(&ws);
+    if (ws.valid) {
+        memcpy(colors, ws.seg0_col, sizeof(colors));
+    } else {
+        uint8_t primary_hue = s_color_slider ? (uint8_t)lv_slider_get_value(s_color_slider) : 0;
+        uint8_t secondary_hue = s_secondary_color_slider ? (uint8_t)lv_slider_get_value(s_secondary_color_slider) : 0;
+        hue_to_rgb(primary_hue, &colors[0][0], &colors[0][1], &colors[0][2]);
+        hue_to_rgb(secondary_hue, &colors[1][0], &colors[1][1], &colors[1][2]);
+    }
+    hue_to_rgb((uint8_t)v, &colors[slot][0], &colors[slot][1], &colors[slot][2]);
+
+    char json[144];
+    snprintf(json, sizeof(json),
+             "{\"seg\":[{\"col\":[[%u,%u,%u],[%u,%u,%u],[%u,%u,%u]]}]}",
+             colors[0][0], colors[0][1], colors[0][2],
+             colors[1][0], colors[1][1], colors[1][2],
+             colors[2][0], colors[2][1], colors[2][2]);
     cmd_tx_send_json(json);
-    color_label_set((uint8_t)v);
-    color_tint_set((uint8_t)v);
+    color_label_set(slot == LIGHTS_COLOR_SLOT_PRIMARY ? s_color_label : s_secondary_color_label, (uint8_t)v);
+    color_tint_set(lv_event_get_target(e), (uint8_t)v);
     if (code != LV_EVENT_VALUE_CHANGED) {
-        char buf[24]; snprintf(buf, sizeof(buf), "Color  hue %d", v);
+        char buf[32]; snprintf(buf, sizeof(buf), "%s hue %d", slot == LIGHTS_COLOR_SLOT_PRIMARY ? "Primary" : "Secondary", v);
         toast_show(buf);
     }
 }
@@ -666,6 +883,52 @@ static void kel_arc_changed(lv_event_t *e)
     }
 }
 
+static void effect_param_row_create(lv_obj_t *parent, size_t index, lv_color_t color)
+{
+    if (index >= WLED_EFFECT_PARAM_COUNT) return;
+
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), 58);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 10, LV_PART_MAIN);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *label = lv_label_create(row);
+    lv_label_set_text(label, "Param");
+    lv_obj_set_width(label, 170);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(label, THEME_TEXT_SECONDARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, THEME_FONT_LABEL, LV_PART_MAIN);
+
+    lv_obj_t *slider = lv_slider_create(row);
+    lv_obj_set_flex_grow(slider, 1);
+    lv_obj_set_height(slider, 30);
+    lv_slider_set_range(slider, 0, 255);
+    lv_slider_set_value(slider, 128, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(slider, lv_color_hex(0x1A2236), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(slider, color, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(slider, 10, LV_PART_MAIN);
+    lv_obj_set_style_radius(slider, 10, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(slider, lv_color_white(), LV_PART_KNOB);
+    lv_obj_set_style_pad_all(slider, 2, LV_PART_KNOB);
+    lv_obj_add_event_cb(slider, effect_param_changed, LV_EVENT_VALUE_CHANGED, (void *)(intptr_t)index);
+    lv_obj_add_event_cb(slider, effect_param_changed, LV_EVENT_RELEASED, (void *)(intptr_t)index);
+
+    lv_obj_t *value = lv_label_create(row);
+    lv_label_set_text(value, "128");
+    lv_obj_set_width(value, 42);
+    lv_obj_set_style_text_align(value, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(value, THEME_TEXT_PRIMARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(value, THEME_FONT_LABEL, LV_PART_MAIN);
+
+    s_effect_param_rows[index] = row;
+    s_effect_param_labels[index] = label;
+    s_effect_param_sliders[index] = slider;
+    s_effect_param_value_labels[index] = value;
+}
+
 lv_obj_t *screen_lights_create(lv_obj_t *parent)
 {
     lv_obj_t *p = page_root(parent);
@@ -677,22 +940,22 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
     s_lights_effects_page = lights_panel_create(p);
     s_lights_presets_page = lights_panel_create(p);
 
-    lv_obj_t *status_card = lv_obj_create(s_lights_home_page);
-    lv_obj_remove_style_all(status_card);
-    theme_style_glass_panel(status_card, 18);
-    lv_obj_set_size(status_card, LV_PCT(100), 64);
-    lv_obj_set_flex_flow(status_card, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(status_card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_hor(status_card, 18, LV_PART_MAIN);
-    lv_obj_set_style_pad_column(status_card, 12, LV_PART_MAIN);
-    lv_obj_clear_flag(status_card, LV_OBJ_FLAG_SCROLLABLE);
+    s_lights_status_card = lv_obj_create(s_lights_home_page);
+    lv_obj_remove_style_all(s_lights_status_card);
+    theme_style_glass_panel(s_lights_status_card, 18);
+    lv_obj_set_size(s_lights_status_card, LV_PCT(100), 64);
+    lv_obj_set_flex_flow(s_lights_status_card, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_lights_status_card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_hor(s_lights_status_card, 18, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(s_lights_status_card, 12, LV_PART_MAIN);
+    lv_obj_clear_flag(s_lights_status_card, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *status_icon = lv_label_create(status_card);
+    lv_obj_t *status_icon = lv_label_create(s_lights_status_card);
     lv_label_set_text(status_icon, LV_SYMBOL_HOME);
     lv_obj_set_style_text_color(status_icon, THEME_PRIMARY_COLOR, LV_PART_MAIN);
     lv_obj_set_style_text_font(status_icon, THEME_FONT_TITLE, LV_PART_MAIN);
 
-    lv_obj_t *status_col = lv_obj_create(status_card);
+    lv_obj_t *status_col = lv_obj_create(s_lights_status_card);
     lv_obj_remove_style_all(status_col);
     lv_obj_remove_flag(status_col, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_set_size(status_col, 1, LV_SIZE_CONTENT);
@@ -724,12 +987,12 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
     lv_obj_set_style_pad_all(hero, 14, LV_PART_MAIN);
     lv_obj_clear_flag(hero, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* ── Left side: two tall vertical sliders ── */
+    /* ── Left side: tall vertical sliders ── */
 
     /* Brightness slider column */
     lv_obj_t *bri_col = lv_obj_create(hero);
     lv_obj_remove_style_all(bri_col);
-    lv_obj_set_size(bri_col, 90, 370);
+    lv_obj_set_size(bri_col, 72, 370);
     lv_obj_align(bri_col, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_set_flex_flow(bri_col, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(bri_col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -742,7 +1005,7 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
     lv_obj_set_style_text_font(bri_cap, THEME_FONT_BODY, LV_PART_MAIN);
 
     s_bri_slider = lv_slider_create(bri_col);
-    lv_obj_set_size(s_bri_slider, 78, 300);
+    lv_obj_set_size(s_bri_slider, 62, 300);
     lv_slider_set_orientation(s_bri_slider, LV_SLIDER_ORIENTATION_VERTICAL);
     lv_slider_set_range(s_bri_slider, 0, 100);
     lv_obj_set_style_bg_color(s_bri_slider, lv_color_hex(0x1A2236), LV_PART_MAIN);
@@ -761,23 +1024,23 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
     lv_obj_set_style_text_color(s_bri_label, THEME_TEXT_PRIMARY, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_bri_label, THEME_FONT_LABEL, LV_PART_MAIN);
 
-    /* RGB color slider column */
+    /* Primary color slider column */
     lv_obj_t *color_col = lv_obj_create(hero);
     lv_obj_remove_style_all(color_col);
-    lv_obj_set_size(color_col, 90, 370);
-    lv_obj_align(color_col, LV_ALIGN_TOP_LEFT, 100, 0);
+    lv_obj_set_size(color_col, 72, 370);
+    lv_obj_align(color_col, LV_ALIGN_TOP_LEFT, 76, 0);
     lv_obj_set_flex_flow(color_col, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(color_col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(color_col, 6, LV_PART_MAIN);
     lv_obj_clear_flag(color_col, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *color_cap = lv_label_create(color_col);
-    lv_label_set_text(color_cap, "RGB");
+    lv_label_set_text(color_cap, "Primary");
     lv_obj_set_style_text_color(color_cap, THEME_TEXT_SECONDARY, LV_PART_MAIN);
     lv_obj_set_style_text_font(color_cap, THEME_FONT_SMALL, LV_PART_MAIN);
 
     s_color_slider = lv_slider_create(color_col);
-    lv_obj_set_size(s_color_slider, 78, 300);
+    lv_obj_set_size(s_color_slider, 62, 300);
     lv_slider_set_orientation(s_color_slider, LV_SLIDER_ORIENTATION_VERTICAL);
     lv_slider_set_range(s_color_slider, 0, 255);
     lv_slider_set_value(s_color_slider, 0, LV_ANIM_OFF);
@@ -790,19 +1053,56 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
     lv_obj_set_style_bg_color(s_color_slider, lv_color_hex(0xFF0000), LV_PART_KNOB);
     lv_obj_set_style_bg_opa(s_color_slider, LV_OPA_COVER, LV_PART_KNOB);
     lv_obj_set_style_shadow_width(s_color_slider, 0, LV_PART_MAIN);
-    lv_obj_add_event_cb(s_color_slider, color_changed, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_obj_add_event_cb(s_color_slider, color_changed, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(s_color_slider, color_slot_changed, LV_EVENT_VALUE_CHANGED, (void *)(intptr_t)LIGHTS_COLOR_SLOT_PRIMARY);
+    lv_obj_add_event_cb(s_color_slider, color_slot_changed, LV_EVENT_RELEASED, (void *)(intptr_t)LIGHTS_COLOR_SLOT_PRIMARY);
 
     s_color_label = lv_label_create(color_col);
     lv_label_set_text(s_color_label, "Hue 0");
     lv_obj_set_style_text_color(s_color_label, THEME_TEXT_PRIMARY, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_color_label, THEME_FONT_SMALL, LV_PART_MAIN);
 
+    /* Secondary color slider column */
+    lv_obj_t *secondary_col = lv_obj_create(hero);
+    lv_obj_remove_style_all(secondary_col);
+    lv_obj_set_size(secondary_col, 72, 370);
+    lv_obj_align(secondary_col, LV_ALIGN_TOP_LEFT, 152, 0);
+    lv_obj_set_flex_flow(secondary_col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(secondary_col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(secondary_col, 6, LV_PART_MAIN);
+    lv_obj_clear_flag(secondary_col, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *secondary_cap = lv_label_create(secondary_col);
+    lv_label_set_text(secondary_cap, "Second");
+    lv_obj_set_style_text_color(secondary_cap, THEME_TEXT_SECONDARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(secondary_cap, THEME_FONT_SMALL, LV_PART_MAIN);
+
+    s_secondary_color_slider = lv_slider_create(secondary_col);
+    lv_obj_set_size(s_secondary_color_slider, 62, 300);
+    lv_slider_set_orientation(s_secondary_color_slider, LV_SLIDER_ORIENTATION_VERTICAL);
+    lv_slider_set_range(s_secondary_color_slider, 0, 255);
+    lv_slider_set_value(s_secondary_color_slider, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s_secondary_color_slider, lv_color_hex(0x1A2236), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_secondary_color_slider, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_secondary_color_slider, lv_color_hex(0xFF0000), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(s_secondary_color_slider, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(s_secondary_color_slider, 20, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_secondary_color_slider, 20, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_secondary_color_slider, lv_color_hex(0xFF0000), LV_PART_KNOB);
+    lv_obj_set_style_bg_opa(s_secondary_color_slider, LV_OPA_COVER, LV_PART_KNOB);
+    lv_obj_set_style_shadow_width(s_secondary_color_slider, 0, LV_PART_MAIN);
+    lv_obj_add_event_cb(s_secondary_color_slider, color_slot_changed, LV_EVENT_VALUE_CHANGED, (void *)(intptr_t)LIGHTS_COLOR_SLOT_SECONDARY);
+    lv_obj_add_event_cb(s_secondary_color_slider, color_slot_changed, LV_EVENT_RELEASED, (void *)(intptr_t)LIGHTS_COLOR_SLOT_SECONDARY);
+
+    s_secondary_color_label = lv_label_create(secondary_col);
+    lv_label_set_text(s_secondary_color_label, "Hue 0");
+    lv_obj_set_style_text_color(s_secondary_color_label, THEME_TEXT_PRIMARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_secondary_color_label, THEME_FONT_SMALL, LV_PART_MAIN);
+
     /* Kelvin/CCT slider column */
     lv_obj_t *kel_col = lv_obj_create(hero);
     lv_obj_remove_style_all(kel_col);
-    lv_obj_set_size(kel_col, 90, 370);
-    lv_obj_align(kel_col, LV_ALIGN_TOP_LEFT, 200, 0);
+    lv_obj_set_size(kel_col, 72, 370);
+    lv_obj_align(kel_col, LV_ALIGN_TOP_LEFT, 228, 0);
     lv_obj_set_flex_flow(kel_col, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(kel_col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(kel_col, 6, LV_PART_MAIN);
@@ -814,7 +1114,7 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
     lv_obj_set_style_text_font(kel_cap, THEME_FONT_SMALL, LV_PART_MAIN);
 
     s_kel_slider = lv_slider_create(kel_col);
-    lv_obj_set_size(s_kel_slider, 78, 300);
+    lv_obj_set_size(s_kel_slider, 62, 300);
     lv_slider_set_orientation(s_kel_slider, LV_SLIDER_ORIENTATION_VERTICAL);
     lv_obj_set_style_bg_color(s_kel_slider, lv_color_hex(0x1A2236), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_kel_slider, LV_OPA_COVER, LV_PART_MAIN);
@@ -837,8 +1137,8 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
     /* Background circle behind the arc */
     lv_obj_t *circle_bg = lv_obj_create(hero);
     lv_obj_remove_style_all(circle_bg);
-    lv_obj_set_size(circle_bg, 310, 310);
-    lv_obj_align(circle_bg, LV_ALIGN_RIGHT_MID, -10, 0);
+    lv_obj_set_size(circle_bg, 260, 260);
+    lv_obj_align(circle_bg, LV_ALIGN_RIGHT_MID, -4, 0);
     lv_obj_set_style_radius(circle_bg, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_bg_color(circle_bg, lv_color_hex(0x0D0D0D), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(circle_bg, LV_OPA_COVER, LV_PART_MAIN);
@@ -846,15 +1146,15 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
 
     /* Kelvin arc — full 360° ring */
     s_kel_arc = lv_arc_create(hero);
-    lv_obj_set_size(s_kel_arc, 310, 310);
-    lv_obj_align(s_kel_arc, LV_ALIGN_RIGHT_MID, -10, 0);
+    lv_obj_set_size(s_kel_arc, 260, 260);
+    lv_obj_align(s_kel_arc, LV_ALIGN_RIGHT_MID, -4, 0);
     lv_arc_set_rotation(s_kel_arc, 270);
     lv_arc_set_bg_angles(s_kel_arc, 0, 360);
     lv_arc_set_range(s_kel_arc, 2000, 6500);
     lv_arc_set_value(s_kel_arc, 4000);
-    lv_obj_set_style_arc_width(s_kel_arc, 32, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_kel_arc, 28, LV_PART_MAIN);
     lv_obj_set_style_arc_color(s_kel_arc, lv_color_hex(0x606682), LV_PART_MAIN);
-    lv_obj_set_style_arc_width(s_kel_arc, 32, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(s_kel_arc, 28, LV_PART_INDICATOR);
     lv_obj_set_style_arc_color(s_kel_arc, lv_color_hex(0xFFB347), LV_PART_INDICATOR);
     lv_obj_set_style_bg_opa(s_kel_arc, LV_OPA_TRANSP, LV_PART_KNOB);
     lv_obj_set_style_border_color(s_kel_arc, lv_color_hex(0x606682), LV_PART_KNOB);
@@ -866,8 +1166,8 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
 
     /* Power button — centered inside the arc ring */
     s_power_btn = lv_button_create(hero);
-    lv_obj_set_size(s_power_btn, 150, 150);
-    lv_obj_align(s_power_btn, LV_ALIGN_RIGHT_MID, -90, 0);
+    lv_obj_set_size(s_power_btn, 126, 126);
+    lv_obj_align(s_power_btn, LV_ALIGN_RIGHT_MID, -71, 0);
     lv_obj_set_style_radius(s_power_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_power_btn, lv_color_hex(0x343645), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_power_btn, LV_OPA_COVER, LV_PART_MAIN);
@@ -893,14 +1193,51 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
     lv_obj_set_style_text_color(s_arc_kel_label, THEME_TEXT_SECONDARY, LV_PART_MAIN);
     lv_obj_align(s_arc_kel_label, LV_ALIGN_CENTER, 0, 46);
 
+    lv_obj_t *quick_preset_card = lv_obj_create(s_lights_home_page);
+    lv_obj_remove_style_all(quick_preset_card);
+    theme_style_glass_panel(quick_preset_card, 18);
+    lv_obj_set_size(quick_preset_card, LV_PCT(100), 116);
+    lv_obj_set_style_pad_all(quick_preset_card, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(quick_preset_card, 8, LV_PART_MAIN);
+    lv_obj_set_flex_flow(quick_preset_card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_clear_flag(quick_preset_card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *quick_preset_title = lv_label_create(quick_preset_card);
+    lv_label_set_text(quick_preset_title, "Presets");
+    lv_obj_set_style_text_color(quick_preset_title, THEME_TEXT_SECONDARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(quick_preset_title, THEME_FONT_LABEL, LV_PART_MAIN);
+
+    lv_obj_t *quick_preset_strip = lv_obj_create(quick_preset_card);
+    lv_obj_remove_style_all(quick_preset_strip);
+    lv_obj_set_size(quick_preset_strip, LV_PCT(100), 58);
+    lv_obj_set_flex_flow(quick_preset_strip, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(quick_preset_strip, 8, LV_PART_MAIN);
+    lv_obj_set_scroll_dir(quick_preset_strip, LV_DIR_HOR);
+    lv_obj_set_scrollbar_mode(quick_preset_strip, LV_SCROLLBAR_MODE_ACTIVE);
+
+    for (int i = 0; i < LIGHTS_PRESET_COUNT; i++) {
+        lv_obj_t *btn = lv_button_create(quick_preset_strip);
+        lv_obj_set_size(btn, 74, 52);
+        lv_obj_set_style_radius(btn, 16, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x1A2236), LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
+        lv_obj_add_event_cb(btn, preset_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)(i + 1));
+        lv_obj_t *lbl = lv_label_create(btn);
+        char num[4];
+        snprintf(num, sizeof(num), "%d", i + 1);
+        lv_label_set_text(lbl, num);
+        lv_obj_set_style_text_font(lbl, THEME_FONT_LABEL, LV_PART_MAIN);
+        lv_obj_center(lbl);
+    }
+
     lv_obj_t *menu_row = lv_obj_create(s_lights_home_page);
     lv_obj_remove_style_all(menu_row);
     lv_obj_set_size(menu_row, LV_PCT(100), 92);
     lv_obj_set_flex_flow(menu_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_column(menu_row, 10, LV_PART_MAIN);
     lv_obj_clear_flag(menu_row, LV_OBJ_FLAG_SCROLLABLE);
-    lights_menu_tile(menu_row, LV_SYMBOL_PLAY, "Effects", "FX, palette, speed", s_lights_effects_page);
-    lights_menu_tile(menu_row, LV_SYMBOL_LIST, "Presets", "Scenes 1-16", s_lights_presets_page);
+    lights_menu_tile(menu_row, LV_SYMBOL_PLAY, "Effects", "FX, palette, controls", s_lights_effects_page);
+    lights_menu_tile(menu_row, LV_SYMBOL_LIST, "Presets", "Scenes 1-64", s_lights_presets_page);
 
     lights_header(s_lights_effects_page, "Effects");
 
@@ -935,6 +1272,9 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
 
     s_fx_label = lv_label_create(fx_chip);
     lv_label_set_text(s_fx_label, "FX --");
+    lv_obj_set_width(s_fx_label, 1);
+    lv_obj_set_flex_grow(s_fx_label, 1);
+    lv_label_set_long_mode(s_fx_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_color(s_fx_label, THEME_TEXT_PRIMARY, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_fx_label, THEME_FONT_LABEL, LV_PART_MAIN);
 
@@ -984,25 +1324,50 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
     lv_label_set_text(pn_lbl, LV_SYMBOL_RIGHT);
     lv_obj_center(pn_lbl);
 
+    lv_obj_t *dropdown_card = lv_obj_create(s_lights_effects_page);
+    lv_obj_remove_style_all(dropdown_card);
+    theme_style_glass_panel(dropdown_card, 16);
+    lv_obj_set_size(dropdown_card, LV_PCT(100), 76);
+    lv_obj_set_style_pad_all(dropdown_card, 10, LV_PART_MAIN);
+    lv_obj_clear_flag(dropdown_card, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_effect_dropdown = lv_dropdown_create(dropdown_card);
+    lv_obj_set_size(s_effect_dropdown, LV_PCT(100), 56);
+    lv_dropdown_set_options(s_effect_dropdown, wled_effect_catalog_options());
+    lv_dropdown_set_symbol(s_effect_dropdown, LV_SYMBOL_DOWN);
+    lv_dropdown_set_dir(s_effect_dropdown, LV_DIR_BOTTOM);
+    lv_obj_set_style_bg_color(s_effect_dropdown, THEME_SURFACE_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_effect_dropdown, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_effect_dropdown, THEME_BORDER_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_effect_dropdown, 1, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_effect_dropdown, 14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_effect_dropdown, THEME_TEXT_PRIMARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_effect_dropdown, THEME_FONT_BODY, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(s_effect_dropdown, 14, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(s_effect_dropdown, 10, LV_PART_MAIN);
+    lv_obj_add_event_cb(s_effect_dropdown, fx_dropdown_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
     lights_header(s_lights_presets_page, "Presets");
 
     /* ── Preset grid ── */
     lv_obj_t *preset_card = lv_obj_create(s_lights_presets_page);
     lv_obj_remove_style_all(preset_card);
     theme_style_glass_panel(preset_card, 14);
-    lv_obj_set_size(preset_card, LV_PCT(100), 396);
+    lv_obj_set_size(preset_card, LV_PCT(100), 456);
     lv_obj_set_style_pad_all(preset_card, 14, LV_PART_MAIN);
     lv_obj_set_style_pad_row(preset_card, 8, LV_PART_MAIN);
     lv_obj_set_style_pad_column(preset_card, 8, LV_PART_MAIN);
     lv_obj_set_layout(preset_card, LV_LAYOUT_GRID);
     static const int32_t col_dsc[] = {LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1),
                                        LV_GRID_TEMPLATE_LAST};
-    static const int32_t row_dsc[] = {LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1),
+    static const int32_t row_dsc[] = {62, 62, 62, 62, 62, 62, 62, 62,
+                                      62, 62, 62, 62, 62, 62, 62, 62,
                                       LV_GRID_TEMPLATE_LAST};
     lv_obj_set_grid_dsc_array(preset_card, col_dsc, row_dsc);
-    lv_obj_clear_flag(preset_card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(preset_card, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(preset_card, LV_SCROLLBAR_MODE_ACTIVE);
 
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < LIGHTS_PRESET_COUNT; i++) {
         lv_obj_t *btn = lv_button_create(preset_card);
         lv_obj_set_size(btn, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
         lv_obj_set_style_radius(btn, 18, LV_PART_MAIN);
@@ -1026,69 +1391,32 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
     lv_obj_set_size(tune_card, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_style_pad_all(tune_card, 16, LV_PART_MAIN);
     lv_obj_set_flex_flow(tune_card, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(tune_card, 16, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(tune_card, 12, LV_PART_MAIN);
     lv_obj_clear_flag(tune_card, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Speed slider */
-    lv_obj_t *spd_row = lv_obj_create(tune_card);
-    lv_obj_remove_style_all(spd_row);
-    lv_obj_set_size(spd_row, LV_PCT(100), 56);
-    lv_obj_set_flex_flow(spd_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(spd_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(spd_row, 10, LV_PART_MAIN);
-    lv_obj_clear_flag(spd_row, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t *spd_lbl = lv_label_create(spd_row);
-    lv_label_set_text(spd_lbl, "Speed");
-    lv_obj_set_style_text_color(spd_lbl, THEME_TEXT_SECONDARY, LV_PART_MAIN);
-    lv_obj_set_style_text_font(spd_lbl, THEME_FONT_LABEL, LV_PART_MAIN);
-    lv_obj_set_width(spd_lbl, 92);
-    s_speed_slider = lv_slider_create(spd_row);
-    lv_obj_set_flex_grow(s_speed_slider, 1);
-    lv_obj_set_height(s_speed_slider, 30);
-    lv_slider_set_range(s_speed_slider, 0, 255);
-    lv_slider_set_value(s_speed_slider, 128, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(s_speed_slider, lv_color_hex(0x1A2236), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(s_speed_slider, THEME_PRIMARY_COLOR, LV_PART_INDICATOR);
-    lv_obj_set_style_radius(s_speed_slider, 10, LV_PART_MAIN);
-    lv_obj_set_style_radius(s_speed_slider, 10, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(s_speed_slider, lv_color_white(), LV_PART_KNOB);
-    lv_obj_set_style_pad_all(s_speed_slider, 2, LV_PART_KNOB);
-    lv_obj_add_event_cb(s_speed_slider, speed_changed, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_obj_add_event_cb(s_speed_slider, speed_changed, LV_EVENT_RELEASED, NULL);
-
-    /* Intensity slider */
-    lv_obj_t *ix_row = lv_obj_create(tune_card);
-    lv_obj_remove_style_all(ix_row);
-    lv_obj_set_size(ix_row, LV_PCT(100), 56);
-    lv_obj_set_flex_flow(ix_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(ix_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(ix_row, 10, LV_PART_MAIN);
-    lv_obj_clear_flag(ix_row, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t *ix_lbl = lv_label_create(ix_row);
-    lv_label_set_text(ix_lbl, "Intensity");
-    lv_obj_set_style_text_color(ix_lbl, THEME_TEXT_SECONDARY, LV_PART_MAIN);
-    lv_obj_set_style_text_font(ix_lbl, THEME_FONT_LABEL, LV_PART_MAIN);
-    lv_obj_set_width(ix_lbl, 92);
-    s_intensity_slider = lv_slider_create(ix_row);
-    lv_obj_set_flex_grow(s_intensity_slider, 1);
-    lv_obj_set_height(s_intensity_slider, 30);
-    lv_slider_set_range(s_intensity_slider, 0, 255);
-    lv_slider_set_value(s_intensity_slider, 128, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(s_intensity_slider, lv_color_hex(0x1A2236), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(s_intensity_slider, THEME_ACCENT_COLOR, LV_PART_INDICATOR);
-    lv_obj_set_style_radius(s_intensity_slider, 10, LV_PART_MAIN);
-    lv_obj_set_style_radius(s_intensity_slider, 10, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(s_intensity_slider, lv_color_white(), LV_PART_KNOB);
-    lv_obj_set_style_pad_all(s_intensity_slider, 2, LV_PART_KNOB);
-    lv_obj_add_event_cb(s_intensity_slider, intensity_changed, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_obj_add_event_cb(s_intensity_slider, intensity_changed, LV_EVENT_RELEASED, NULL);
+    lv_color_t param_colors[WLED_EFFECT_PARAM_COUNT] = {
+        THEME_PRIMARY_COLOR,
+        THEME_ACCENT_COLOR,
+        lv_color_hex(0x2EC4B6),
+        lv_color_hex(0xFFCA3A),
+        lv_color_hex(0xB967FF),
+    };
+    for (size_t i = 0; i < WLED_EFFECT_PARAM_COUNT; i++) {
+        effect_param_row_create(tune_card, i, param_colors[i]);
+    }
+    lights_effect_selector_set(0);
 
     /* Subscribe + initial sync */
     led_state_subscribe(lights_state_cb, NULL);
     wled_state_subscribe(lights_wled_state_cb, NULL);
+    s_lights_led_dirty = false;
+    s_lights_wled_dirty = false;
     led_state_t init; led_state_get(&init);
-    lights_state_cb(&init, NULL);
+    lights_apply_led_state(&init);
+    wled_state_t winit; wled_state_get(&winit);
+    lights_apply_wled_state(&winit);
     lights_status_refresh(NULL);
+    lv_timer_create(lights_sync_refresh, 150, NULL);
     lv_timer_create(lights_status_refresh, 1500, NULL);
     lights_show_panel(s_lights_home_page);
 
@@ -2113,7 +2441,7 @@ typedef struct {
     lv_obj_t *value_label;
 } stepper_ctx_t;
 
-#define SETTINGS_STEPPER_MAX 32
+#define SETTINGS_STEPPER_MAX 40
 
 static stepper_ctx_t s_steppers[SETTINGS_STEPPER_MAX];
 static int           s_stepper_count;
@@ -2145,6 +2473,7 @@ static void stepper_btn_cb(lv_event_t *e)
 
 static void settings_hide_keyboard(void);
 static void settings_status_refresh(lv_timer_t *t);
+static esp_err_t theme_save_controls(bool refresh_background);
 
 /* Settings-row callbacks – tiny shims so setter signatures match */
 static int  rd_kmin(void)   { led_state_t s; led_state_get(&s); return s.kelvin_min; }
@@ -2220,8 +2549,34 @@ DEFINE_TUNING_ACCESSORS(auto_ramp, auto_brightness_ramp_s, tuning_backlight_chan
 DEFINE_TUNING_ACCESSORS(auto_hold, auto_brightness_hold_min, tuning_auto_hold_changed())
 DEFINE_TUNING_ACCESSORS(low_warn, low_brightness_warn_pct, tuning_status_changed())
 DEFINE_TUNING_ACCESSORS(idle_check, idle_check_s, tuning_idle_changed())
+DEFINE_TUNING_ACCESSORS(idle_wake_timer_min, idle_dismiss_lights_timer_min, tuning_idle_changed())
 DEFINE_TUNING_ACCESSORS(status_update, status_bar_update_s, tuning_status_changed())
 DEFINE_TUNING_ACCESSORS(toast_duration, toast_duration_ms, (void)0)
+
+static void idle_dismiss_lights_switch_event(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    app_tuning_config_t cfg = load_tuning_config();
+    cfg.idle_dismiss_lights_on = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    if (save_tuning_config(&cfg) == ESP_OK) tuning_idle_changed();
+}
+
+static void idle_wake_timer_switch_event(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    app_tuning_config_t cfg = load_tuning_config();
+    cfg.idle_dismiss_lights_timer_on = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    if (save_tuning_config(&cfg) == ESP_OK) tuning_idle_changed();
+}
+
+static void auto_brightness_switch_event(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    bool enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    esp_err_t err = backlight_manager_set_enabled(enabled);
+    toast_show(err == ESP_OK ? (enabled ? "Auto-brightness ON" : "Auto-brightness OFF") : esp_err_to_name(err));
+    settings_status_refresh(NULL);
+}
 
 static stepper_ctx_t *add_stepper_row(lv_obj_t *parent, const char *icon,
                                       const char *label,
@@ -2313,6 +2668,7 @@ static lv_obj_t *s_settings_audio_page;
 static lv_obj_t *s_settings_system_page;
 static lv_obj_t *s_settings_about_page;
 static lv_obj_t *s_settings_display_status;
+static lv_obj_t *s_auto_brightness_switch;
 static lv_obj_t *s_settings_idle_status;
 static lv_obj_t *s_home_wifi_summary;
 static lv_obj_t *s_home_wled_summary;
@@ -2327,7 +2683,11 @@ static lv_obj_t *s_wifi_password_ta;
 static lv_obj_t *s_wifi_password_keyboard;
 static lv_obj_t *s_weather_key_ta;
 static lv_obj_t *s_weather_location_label;
+static lv_obj_t *s_idle_dismiss_lights_switch;
+static lv_obj_t *s_idle_wake_timer_switch;
 static lv_obj_t *s_theme_bg_dropdown;
+static lv_obj_t *s_theme_background_enabled_switch;
+static lv_obj_t *s_theme_idle_only_switch;
 static lv_obj_t *s_theme_opacity_slider;
 static lv_obj_t *s_theme_dim_slider;
 static lv_obj_t *s_theme_slideshow_slider;
@@ -4286,6 +4646,8 @@ static void theme_collect_controls(app_theme_config_t *cfg)
     if (s_theme_opacity_slider) cfg->surface_opacity_pct = (uint8_t)lv_slider_get_value(s_theme_opacity_slider);
     if (s_theme_dim_slider) cfg->background_dim_pct = (uint8_t)lv_slider_get_value(s_theme_dim_slider);
     if (s_theme_slideshow_slider) cfg->slideshow_seconds = (uint16_t)lv_slider_get_value(s_theme_slideshow_slider);
+    if (s_theme_background_enabled_switch) cfg->background_enabled = lv_obj_has_state(s_theme_background_enabled_switch, LV_STATE_CHECKED);
+    if (s_theme_idle_only_switch) cfg->background_idle_only = lv_obj_has_state(s_theme_idle_only_switch, LV_STATE_CHECKED);
     if (s_theme_bg_dropdown) cfg->background_preset = theme_clamp_bg_preset((uint8_t)lv_dropdown_get_selected(s_theme_bg_dropdown));
     else cfg->background_preset = theme_clamp_bg_preset(cfg->background_preset);
 
@@ -4399,6 +4761,61 @@ static lv_obj_t *theme_background_picker(lv_obj_t *parent)
     return dropdown;
 }
 
+static void theme_switch_event(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = theme_save_controls(true);
+    if (err != ESP_OK) toast_show(esp_err_to_name(err));
+    settings_status_refresh(NULL);
+}
+
+static void settings_switch_set_checked(lv_obj_t *sw, bool checked)
+{
+    if (!sw) return;
+    if (checked) lv_obj_add_state(sw, LV_STATE_CHECKED);
+    else lv_obj_clear_state(sw, LV_STATE_CHECKED);
+}
+
+static lv_obj_t *settings_switch_row(lv_obj_t *parent, const char *icon, const char *label_text,
+                                     lv_event_cb_t event_cb, void *user_data)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 12, LV_PART_MAIN);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *ic = lv_label_create(row);
+    lv_label_set_text(ic, icon);
+    lv_obj_set_style_text_color(ic, THEME_PRIMARY_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_text_font(ic, THEME_FONT_LARGE, LV_PART_MAIN);
+
+    lv_obj_t *label = lv_label_create(row);
+    lv_label_set_text(label, label_text);
+    lv_obj_set_style_text_color(label, THEME_TEXT_PRIMARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, THEME_FONT_BODY, LV_PART_MAIN);
+    lv_obj_set_flex_grow(label, 1);
+
+    lv_obj_t *sw = lv_switch_create(row);
+    lv_obj_set_size(sw, 88, 44);
+    lv_obj_set_style_bg_color(sw, THEME_SURFACE_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(sw, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(sw, THEME_BORDER_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_border_width(sw, 1, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(sw, THEME_PRIMARY_COLOR, LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_opa(sw, LV_OPA_COVER, LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(sw, THEME_TEXT_PRIMARY, LV_PART_KNOB);
+    if (event_cb) lv_obj_add_event_cb(sw, event_cb, LV_EVENT_VALUE_CHANGED, user_data);
+    return sw;
+}
+
+static lv_obj_t *theme_switch_row(lv_obj_t *parent, const char *icon, const char *label_text)
+{
+    return settings_switch_row(parent, icon, label_text, theme_switch_event, NULL);
+}
+
 static lv_obj_t *theme_color_row(lv_obj_t *parent, theme_color_role_t role)
 {
     lv_obj_t *row = lv_obj_create(parent);
@@ -4437,6 +4854,8 @@ static void theme_settings_load_fields(void)
     app_theme_config_t cfg;
     if (app_config_theme_load(&cfg) != ESP_OK) app_config_theme_defaults(&cfg);
     if (s_theme_bg_dropdown) lv_dropdown_set_selected(s_theme_bg_dropdown, theme_clamp_bg_preset(cfg.background_preset));
+    settings_switch_set_checked(s_theme_background_enabled_switch, cfg.background_enabled);
+    settings_switch_set_checked(s_theme_idle_only_switch, cfg.background_idle_only);
     if (s_theme_opacity_slider) lv_slider_set_value(s_theme_opacity_slider, cfg.surface_opacity_pct, LV_ANIM_OFF);
     if (s_theme_dim_slider) lv_slider_set_value(s_theme_dim_slider, cfg.background_dim_pct, LV_ANIM_OFF);
     if (s_theme_slideshow_slider) lv_slider_set_value(s_theme_slideshow_slider, cfg.slideshow_seconds, LV_ANIM_OFF);
@@ -4503,6 +4922,18 @@ static bool weather_status_is_inflight(const char *detail)
     return detail && (!strncmp(detail, "Fetching", 8) || !strcmp(detail, "Weather queued"));
 }
 
+static void idle_settings_load_fields(void)
+{
+    app_tuning_config_t cfg = load_tuning_config();
+    settings_switch_set_checked(s_idle_dismiss_lights_switch, cfg.idle_dismiss_lights_on);
+    settings_switch_set_checked(s_idle_wake_timer_switch, cfg.idle_dismiss_lights_timer_on);
+}
+
+static void display_settings_load_fields(void)
+{
+    settings_switch_set_checked(s_auto_brightness_switch, backlight_manager_is_enabled());
+}
+
 static void settings_load_fields(void)
 {
     app_weather_config_t weather;
@@ -4510,6 +4941,8 @@ static void settings_load_fields(void)
         if (s_weather_key_ta) lv_textarea_set_text(s_weather_key_ta, weather.api_key);
     }
     theme_settings_load_fields();
+    display_settings_load_fields();
+    idle_settings_load_fields();
 }
 
 static void settings_status_refresh(lv_timer_t *t)
@@ -4608,14 +5041,18 @@ static void settings_status_refresh(lv_timer_t *t)
 
         if (bg_state.busy) {
             snprintf(theme_text, sizeof(theme_text), "%s", bg_state.status);
+        } else if (!theme_cfg.background_enabled) {
+            snprintf(theme_text, sizeof(theme_text), "%s  images off  %u%% panels",
+                     preset_label, theme_cfg.surface_opacity_pct);
         } else if (!preset_ready) {
             snprintf(theme_text, sizeof(theme_text), "%s  %u/%u images ready",
                      preset_label, (unsigned)present, (unsigned)total);
         } else if (theme_cfg.background_enabled && theme_cfg.image_count > 0) {
-            snprintf(theme_text, sizeof(theme_text), "%s  %u image%s  %u%% panels",
+            snprintf(theme_text, sizeof(theme_text), "%s  %u image%s  %s  %u%% panels",
                      preset_label,
                      theme_cfg.image_count,
                      theme_cfg.image_count == 1 ? "" : "s",
+                     theme_cfg.background_idle_only ? "idle-only" : "all screens",
                      theme_cfg.surface_opacity_pct);
         } else {
             snprintf(theme_text, sizeof(theme_text), "%s  solid  %u%% panels",
@@ -4655,9 +5092,14 @@ static void settings_status_refresh(lv_timer_t *t)
     }
 
     if (s_settings_display_status) {
-        const char *auto_text = backlight_manager_is_enabled() ? "Auto-brightness ON" : "Manual brightness";
+        bool auto_enabled = backlight_manager_is_enabled();
+        const char *auto_text = auto_enabled ? "Auto-brightness ON  daylight curve active" : "Auto-brightness OFF  manual backlight";
         label_set_text_if_changed(s_settings_display_status, auto_text);
+        lv_obj_set_style_text_color(s_settings_display_status,
+                                    auto_enabled ? THEME_PRIMARY_COLOR : THEME_TEXT_MUTED,
+                                    LV_PART_MAIN);
     }
+    settings_switch_set_checked(s_auto_brightness_switch, backlight_manager_is_enabled());
 
     if (s_settings_audio_status) {
         char audio_text[128];
@@ -4689,15 +5131,6 @@ static void wled_provision_clicked(lv_event_t *e)
     }
     esp_err_t err = provision_init();
     toast_show(err == ESP_OK ? "Provisioning WLED" : esp_err_to_name(err));
-    settings_status_refresh(NULL);
-}
-
-static void auto_brightness_toggle_clicked(lv_event_t *e)
-{
-    (void)e;
-    bool currently = backlight_manager_is_enabled();
-    backlight_manager_set_enabled(!currently);
-    toast_show(!currently ? "Auto-brightness ON" : "Auto-brightness OFF");
     settings_status_refresh(NULL);
 }
 
@@ -4841,6 +5274,40 @@ lv_obj_t *screen_settings_create(lv_obj_t *parent)
     lv_obj_set_style_text_font(initial, THEME_FONT_BODY, LV_PART_MAIN);
 
     settings_header(s_settings_wled_page, "WLED");
+    lv_obj_t *wled_qr_card = deep_card(s_settings_wled_page);
+    lv_obj_set_size(wled_qr_card, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(wled_qr_card, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(wled_qr_card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(wled_qr_card, 18, LV_PART_MAIN);
+
+#if LV_USE_QRCODE
+    lv_obj_t *qr = wled_qr_grid_create(wled_qr_card, WLED_WEB_URL);
+    if (!qr) qr = wled_qr_placeholder_create(wled_qr_card);
+#else
+    lv_obj_t *qr = wled_qr_placeholder_create(wled_qr_card);
+#endif
+    (void)qr;
+
+    lv_obj_t *qr_text = lv_obj_create(wled_qr_card);
+    lv_obj_remove_style_all(qr_text);
+    lv_obj_set_flex_grow(qr_text, 1);
+    lv_obj_set_width(qr_text, 0);
+    lv_obj_set_flex_flow(qr_text, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(qr_text, 6, LV_PART_MAIN);
+    lv_obj_clear_flag(qr_text, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_CLICK_FOCUSABLE);
+
+    lv_obj_t *qr_title = lv_label_create(qr_text);
+    lv_label_set_text(qr_title, "Open WLED");
+    lv_obj_set_style_text_color(qr_title, THEME_TEXT_PRIMARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(qr_title, THEME_FONT_BODY, LV_PART_MAIN);
+
+    lv_obj_t *qr_url = lv_label_create(qr_text);
+    lv_label_set_text(qr_url, WLED_WEB_URL);
+    lv_obj_set_width(qr_url, LV_PCT(100));
+    lv_label_set_long_mode(qr_url, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(qr_url, THEME_PRIMARY_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_text_font(qr_url, THEME_FONT_SMALL, LV_PART_MAIN);
+
     lv_obj_t *wled = deep_card(s_settings_wled_page);
     lv_obj_set_size(wled, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(wled, LV_FLEX_FLOW_COLUMN);
@@ -4871,6 +5338,8 @@ lv_obj_t *screen_settings_create(lv_obj_t *parent)
     lv_obj_set_style_pad_row(theme_card, 16, LV_PART_MAIN);
     s_settings_theme_status = settings_status_label(theme_card);
     s_theme_bg_dropdown = theme_background_picker(theme_card);
+    s_theme_background_enabled_switch = theme_switch_row(theme_card, LV_SYMBOL_IMAGE, "Show background images");
+    s_theme_idle_only_switch = theme_switch_row(theme_card, LV_SYMBOL_HOME, "Idle weather only");
 
     s_theme_download_row = settings_button_row(theme_card);
     s_theme_download_btn = settings_button(s_theme_download_row, LV_SYMBOL_DOWNLOAD " Download backgrounds",
@@ -5093,8 +5562,8 @@ lv_obj_t *screen_settings_create(lv_obj_t *parent)
                     1, 1, 60, " min", ap_auto_hold, rd_auto_hold);
     add_stepper_row(disp_card, LV_SYMBOL_CHARGE, "Low Warn",
                     5, 5, 50, "%", ap_low_warn, rd_low_warn);
-    lv_obj_t *disp_btns = settings_button_row(disp_card);
-    settings_button(disp_btns, "Auto-Brightness", false, auto_brightness_toggle_clicked);
+    s_auto_brightness_switch = settings_switch_row(disp_card, LV_SYMBOL_EYE_OPEN, "Auto-Brightness",
+                                                   auto_brightness_switch_event, NULL);
 
     lv_obj_t *auto_card = deep_card(s_settings_display_page);
     lv_obj_set_size(auto_card, LV_PCT(100), LV_SIZE_CONTENT);
@@ -5128,6 +5597,12 @@ lv_obj_t *screen_settings_create(lv_obj_t *parent)
                     5, 5, 100, "%", ap_disp, rd_disp);
     add_stepper_row(idle_card, LV_SYMBOL_REFRESH, "Idle Check",
                     1, 1, 10, " s", ap_idle_check, rd_idle_check);
+    s_idle_dismiss_lights_switch = settings_switch_row(idle_card, LV_SYMBOL_EYE_OPEN, "Wake Lights",
+                                                       idle_dismiss_lights_switch_event, NULL);
+    s_idle_wake_timer_switch = settings_switch_row(idle_card, LV_SYMBOL_REFRESH, "Wake Timer",
+                                                   idle_wake_timer_switch_event, NULL);
+    add_stepper_row(idle_card, LV_SYMBOL_REFRESH, "Wake Duration",
+                    5, 1, 240, " min", ap_idle_wake_timer_min, rd_idle_wake_timer_min);
 
     /* ---- Audio page ---- */
     settings_header(s_settings_audio_page, "Audio");
@@ -5546,7 +6021,7 @@ lv_obj_t *screen_idle_create(void)
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
     /* Attach background image layer (shared with main screen) */
-    ui_background_attach(scr);
+    ui_background_attach_idle_weather(scr);
 
     /* ===== Top hero: current weather | clock ===== */
     lv_obj_t *top = lv_obj_create(scr);

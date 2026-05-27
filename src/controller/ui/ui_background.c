@@ -163,6 +163,7 @@ typedef struct {
     lv_obj_t *layer;
     lv_obj_t *image;
     lv_obj_t *scrim;
+    bool idle_weather;
 } bg_screen_t;
 static bg_screen_t s_screens[BG_MAX_SCREENS];
 static uint8_t s_screen_count;
@@ -342,18 +343,20 @@ static void apply_background(void)
     ESP_LOGI(TAG, "apply_background: %s (slot %u, preset %u)", lv_path,
              (unsigned)slot, (unsigned)preset);
 
-    /* Apply to all attached screens */
+    bool applied_to_any_screen = false;
     for (uint8_t i = 0; i < s_screen_count; i++) {
         bg_screen_t *s = &s_screens[i];
         if (!s->layer || !s->image || !s->scrim) continue;
+        if (cfg.background_idle_only && !s->idle_weather) continue;
         lv_image_set_src(s->image, lv_path);
         lv_obj_clear_flag(s->image, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_background(s->layer);
         lv_obj_set_style_bg_color(s->scrim, lv_color_black(), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(s->scrim, opacity_from_percent(cfg.background_dim_pct), LV_PART_MAIN);
+        applied_to_any_screen = true;
     }
 
-    if (cfg.image_count > 1) {
+    if (applied_to_any_screen && cfg.image_count > 1) {
         uint32_t period = cfg.slideshow_seconds;
         if (period < 5) period = 5;
         s_timer = lv_timer_create(slide_timer_cb, period * 1000u, NULL);
@@ -385,11 +388,12 @@ void ui_background_pre_init(void)
     }
 }
 
-void ui_background_attach(lv_obj_t *screen)
+static void ui_background_attach_common(lv_obj_t *screen, bool idle_weather)
 {
     if (!screen || s_screen_count >= BG_MAX_SCREENS) return;
 
     bg_screen_t *s = &s_screens[s_screen_count];
+    s->idle_weather = idle_weather;
 
     s->layer = lv_obj_create(screen);
     lv_obj_remove_style_all(s->layer);
@@ -413,6 +417,16 @@ void ui_background_attach(lv_obj_t *screen)
     lv_obj_move_background(s->layer);
     s_screen_count++;
     apply_background();
+}
+
+void ui_background_attach(lv_obj_t *screen)
+{
+    ui_background_attach_common(screen, false);
+}
+
+void ui_background_attach_idle_weather(lv_obj_t *screen)
+{
+    ui_background_attach_common(screen, true);
 }
 
 void ui_background_refresh(void)
@@ -1032,15 +1046,15 @@ static void bg_dl_queue_skip_existing(bg_dl_queue_t *q)
 
 static void bg_dl_queue_run(bg_dl_queue_t *q)
 {
-    esp_http_client_handle_t client = NULL;
-
-    /* Hold the HTTPS-over-SDIO lock for the entire queue to prevent
-     * concurrent HTTPS traffic (weather, GeoIP) from overlapping with
-     * image downloads.  The ESP-Hosted SDIO driver crashes when two
-     * inbound TLS sessions run at the same time.                        */
-    services_https_lock();
-
     (void)sd_storage_ensure_dir(BG_DIR);
+
+    uint8_t to_download = q->count - q->skipped;
+    uint8_t dl_index = 0;   /* 0-based counter of non-skipped items */
+
+    if (q->skipped > 0) {
+        ESP_LOGI(TAG, "download queue: %u already on disk, downloading %u",
+                 q->skipped, to_download);
+    }
 
     for (uint8_t i = 0; i < q->count; i++) {
         bg_dl_item_t *item = &q->items[i];
@@ -1048,65 +1062,89 @@ static void bg_dl_queue_run(bg_dl_queue_t *q)
             continue;
         }
 
-        ESP_LOGI(TAG, "===== IMAGE %u/%u =====", i + 1, q->count);
+        dl_index++;
+        ESP_LOGI(TAG, "===== DOWNLOAD %u/%u (slot %u) =====",
+                 dl_index, to_download, i);
         set_item_progress(i, q->count, 0);
 
-        /* ── Download to PSRAM (with retries) ── */
+        /* ── Download to PSRAM ──
+         * Each image gets its own HTTPS lock + fresh HTTP client so the
+         * SDIO bus is completely idle between images.  The ESP-Hosted
+         * SDIO driver (espressif/esp-hosted-mcu #167, #184) degrades
+         * under sustained inbound HTTPS — capping each burst to one
+         * image and closing the TLS session afterwards keeps the link
+         * healthy.                                                      */
         uint8_t  *data = NULL;
         size_t    bytes = 0;
         int       http_status = 0;
         esp_err_t err = ESP_FAIL;
+        esp_http_client_handle_t client = NULL;
 
         for (uint8_t attempt = 0; attempt <= q->max_retries; attempt++) {
             if (attempt > 0) {
-                ESP_LOGW(TAG, "  [%u] retry %u/%u",
-                         i + 1, attempt, q->max_retries);
+                ESP_LOGW(TAG, "  retry %u/%u",
+                         attempt, q->max_retries);
                 set_statusf("Image %u/%u: retry %u",
-                            (unsigned)(i + 1), (unsigned)q->count, attempt);
+                            (unsigned)dl_index, (unsigned)to_download, attempt);
                 vTaskDelay(pdMS_TO_TICKS(3000));
             }
 
+            services_https_lock();
             sd_storage_set_network_busy(true);
 
             data = NULL;
             bytes = 0;
             http_status = 0;
             err = download_http_jpeg_to_memory(
-                item->url, i, q->count, BG_HTTP_BUFFER_BYTES,
+                item->url, (uint8_t)(dl_index - 1), to_download,
+                BG_HTTP_BUFFER_BYTES,
                 &client, &data, &bytes, &http_status);
 
+            /* Close the HTTP client immediately — end TLS session so
+             * the SDIO bus goes fully idle before the next image.    */
+            if (client) {
+                esp_http_client_close(client);
+                esp_http_client_cleanup(client);
+                client = NULL;
+            }
+
             sd_storage_set_network_busy(false);
+            services_https_unlock();
 
             if (err == ESP_OK && data) break;
 
             /* Download failed — free partial data and retry */
             if (data) { free(data); data = NULL; }
 
-            ESP_LOGW(TAG, "  [%u] attempt %u failed: %s (http %d)",
-                     i + 1, attempt + 1, esp_err_to_name(err), http_status);
+            ESP_LOGW(TAG, "  attempt %u failed: %s (http %d)",
+                     attempt + 1, esp_err_to_name(err), http_status);
         }
 
-        ESP_LOGI(TAG, "  [%u] download %s, %u bytes, http %d",
-                 i + 1, esp_err_to_name(err), (unsigned)bytes, http_status);
+        ESP_LOGI(TAG, "  [%u/%u] download %s, %u bytes, http %d",
+                 dl_index, to_download, esp_err_to_name(err),
+                 (unsigned)bytes, http_status);
 
         if (err != ESP_OK || !data) {
             q->failed++;
             format_download_error(q->last_error, sizeof(q->last_error),
                                   err, http_status);
             set_statusf("Image %u/%u failed: %s",
-                        (unsigned)(i + 1), (unsigned)q->count, q->last_error);
+                        (unsigned)dl_index, (unsigned)to_download,
+                        q->last_error);
             if (data) free(data);
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
 
-        /* ── Write to SD (atomic via tmp → rename) ── */
+        /* ── Write to SD (atomic via tmp → rename) ──
+         * HTTPS lock is released — weather/GeoIP can run while we
+         * write to SD.  SDIO bus is idle during this phase.         */
         esp_err_t sd_err = sd_storage_ensure_mounted();
         if (sd_err != ESP_OK) {
             q->failed++;
             free(data);
             set_statusf("Image %u/%u: SD not available",
-                        (unsigned)(i + 1), (unsigned)q->count);
+                        (unsigned)dl_index, (unsigned)to_download);
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
@@ -1114,7 +1152,7 @@ static void bg_dl_queue_run(bg_dl_queue_t *q)
         (void)sd_storage_ensure_dir(BG_DIR);
 
         set_statusf("Saving image %u/%u (%u KB)",
-                    (unsigned)(i + 1), (unsigned)q->count,
+                    (unsigned)dl_index, (unsigned)to_download,
                     (unsigned)(bytes / 1024u));
 
         esp_err_t werr = write_jpeg_memory_to_tmp(item->tmp, data, bytes);
@@ -1126,7 +1164,7 @@ static void bg_dl_queue_run(bg_dl_queue_t *q)
             q->failed++;
             format_download_error(q->last_error, sizeof(q->last_error), werr, 0);
             set_statusf("Image %u/%u: write failed",
-                        (unsigned)(i + 1), (unsigned)q->count);
+                        (unsigned)dl_index, (unsigned)to_download);
             continue;
         }
 
@@ -1141,57 +1179,34 @@ static void bg_dl_queue_run(bg_dl_queue_t *q)
 
         /* ── Convert progressive → baseline JPEG ── */
         set_statusf("Converting image %u/%u",
-                    (unsigned)(i + 1), (unsigned)q->count);
+                    (unsigned)dl_index, (unsigned)to_download);
         esp_err_t conv = jpeg_progressive_to_baseline(item->dest);
         if (conv == ESP_OK) {
-            ESP_LOGI(TAG, "  [%u] converted progressive->baseline", i + 1);
+            ESP_LOGI(TAG, "  converted progressive->baseline");
         } else if (conv != ESP_ERR_NOT_SUPPORTED) {
-            ESP_LOGW(TAG, "  [%u] conversion failed: %s",
-                     i + 1, esp_err_to_name(conv));
+            ESP_LOGW(TAG, "  conversion failed: %s",
+                     esp_err_to_name(conv));
         }
 
         q->succeeded++;
-        ESP_LOGI(TAG, "  [%u] SAVED %s (%u bytes)",
-                 i + 1, item->dest, (unsigned)bytes);
+        uint8_t total_done = q->skipped + q->succeeded;
+        ESP_LOGI(TAG, "  SAVED %s (%u bytes) [%u/%u complete]",
+                 item->dest, (unsigned)bytes,
+                 total_done, q->count);
         set_progress((uint8_t)(i + 1), q->count, true,
-                     (uint8_t)(((unsigned)(i + 1) * 100u) / q->count));
-        set_statusf("Saved %u/%u images",
-                    (unsigned)q->succeeded, (unsigned)q->count);
+                     (uint8_t)(((unsigned)total_done * 100u) / q->count));
+        set_statusf("%u/%u images ready",
+                    (unsigned)total_done, (unsigned)q->count);
 
         /* Notify caller for incremental config / NVS updates */
         if (q->on_saved) {
             q->on_saved(i, item->tag, item->dest, bytes, q->ctx);
         }
 
-        /* Inter-image settle — let SDIO driver quiesce */
-        vTaskDelay(pdMS_TO_TICKS(3000));
-    }
-
-    /* All images are persisted to SD + NVS.  Close the HTTP client then
-     * reset the entire SDIO link to clear any degraded driver state left
-     * by the sustained download traffic.  If the close itself crashes
-     * SDIO (TLS close_notify burst), the device reboots with everything
-     * already saved — NVS recovery picks up where we left off.          */
-    if (client) {
-        ESP_LOGI(TAG, "download queue: closing HTTP client");
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        client = NULL;
-        ESP_LOGI(TAG, "download queue: client closed OK");
-    }
-
-    services_https_unlock();
-
-    /* Reset the C6 coprocessor and rebuild the SDIO transport so the
-     * link is clean for any subsequent network activity.                 */
-    set_statusf("Resetting WiFi link");
-    esp_err_t link_err = services_reset_wifi_link();
-    if (link_err == ESP_OK) {
-        ESP_LOGI(TAG, "download queue: SDIO link reset OK");
-    } else {
-        ESP_LOGW(TAG, "download queue: SDIO link reset failed: %s",
-                 esp_err_to_name(link_err));
+        /* Inter-image SDIO cooldown — bus is fully idle (client closed,
+         * HTTPS lock released).  Gives the SDIO driver time to clear
+         * any residual internal state before the next TLS handshake.   */
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
 

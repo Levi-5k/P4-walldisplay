@@ -68,6 +68,7 @@ static void load_tuning_values(void)
 {
     app_tuning_config_t tuning;
     if (app_config_tuning_load(&tuning) != ESP_OK) app_config_tuning_defaults(&tuning);
+    s_enabled = tuning.auto_brightness_enabled;
     s_min_pct = tuning.auto_brightness_min_pct;
     s_max_pct = tuning.auto_brightness_max_pct;
     s_hold_s = tuning.auto_brightness_hold_min * 60u;
@@ -214,6 +215,11 @@ esp_err_t backlight_manager_init(void)
 esp_err_t backlight_manager_set_enabled(bool enabled)
 {
     s_enabled = enabled;
+    app_tuning_config_t tuning;
+    if (app_config_tuning_load(&tuning) != ESP_OK) app_config_tuning_defaults(&tuning);
+    tuning.auto_brightness_enabled = enabled;
+    esp_err_t save_err = app_config_tuning_save(&tuning);
+    if (save_err != ESP_OK) ESP_LOGW(TAG, "Failed to save auto-brightness state: %s", esp_err_to_name(save_err));
     if (!s_initialized) return ESP_OK;
 
     if (enabled) {
@@ -225,7 +231,7 @@ esp_err_t backlight_manager_set_enabled(bool enabled)
         lv_timer_pause(s_ramp_timer);
     }
     ESP_LOGI(TAG, "Auto-brightness %s", enabled ? "enabled" : "disabled");
-    return ESP_OK;
+    return save_err;
 }
 
 bool backlight_manager_is_enabled(void)
@@ -239,6 +245,14 @@ esp_err_t backlight_manager_apply_tuning(void)
     if (s_initialized) {
         if (s_eval_timer) lv_timer_set_period(s_eval_timer, (uint32_t)s_eval_s * 1000u);
         if (s_ramp_timer) lv_timer_set_period(s_ramp_timer, ramp_period_ms());
+        if (s_enabled) {
+            if (s_eval_timer) lv_timer_resume(s_eval_timer);
+            if (s_ramp_timer) lv_timer_resume(s_ramp_timer);
+        } else {
+            if (s_eval_timer) lv_timer_pause(s_eval_timer);
+            if (s_ramp_timer) lv_timer_pause(s_ramp_timer);
+            s_holding = false;
+        }
         if (s_holding) s_hold_until_us = esp_timer_get_time() + (uint64_t)s_hold_s * 1000000ULL;
         if (s_enabled && !s_holding) eval_cb(NULL);
     }

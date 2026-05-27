@@ -31,6 +31,7 @@ const char     *bg_preset_dropdown_options(void);
  */
 void ui_background_pre_init(void);
 void ui_background_attach(lv_obj_t *screen);
+void ui_background_attach_idle_weather(lv_obj_t *screen);
 void ui_background_refresh(void);
 
 /* ---- download API ---- */
