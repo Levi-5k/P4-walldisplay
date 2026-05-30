@@ -52,6 +52,8 @@ The bridge usermod is intentionally small. It reads one JSON object per line fro
 
 The P4's `{"v":true}` poll is the normal heartbeat. After the S3 sees valid P4 traffic it only transmits in response to P4 requests/commands, which keeps the half-duplex bus from colliding with independent periodic snapshots. If the P4 link times out, the S3 sends low-rate reconnect announcements only after the bus has been quiet.
 
+The bridge also keeps the S3 recoverable over RS-485 without manual USB resets: the UART is restarted if a previously-seen P4 link stays stale or if repeated malformed frames suggest the receive path is stuck. WLED requests a clean reboot only after repeated RS-485 UART resets fail to restore a previously working P4 link. The WLED `/json/info` usermod section reports this as `86Box RS485 Self-Heal`.
+
 ## Waveshare Pin Defaults
 
 The sample override uses these board-specific defaults:

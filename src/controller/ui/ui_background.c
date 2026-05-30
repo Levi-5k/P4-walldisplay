@@ -2,6 +2,7 @@
 
 #include "app_config.h"
 #include "jpeg_conv.h"
+#include "jpeg_hw.h"
 #include "services.h"
 #include "sd_storage.h"
 #include "theme.h"
@@ -20,29 +21,26 @@
 #include "nvs_flash.h"
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define BG_DIR             "/sdcard/walldisplay_theme"
-/* Per-preset file naming: p<preset>_bg<slot>.jpg */
-#define BG_FILE_FMT        BG_DIR "/p%u_bg%u.jpg"
+/* Per-preset file naming: p<preset>_bg<slot>.raw (HW-decoded RGB565) */
+#define BG_FILE_FMT        BG_DIR "/p%u_bg%u.raw"
 #define BG_TMP_FMT         BG_DIR "/p%u_bg%u.tmp"
-/* LVGL STDIO driver prepends CONFIG_LV_FS_STDIO_PATH ("/") to the path
- * after stripping the drive letter, so omit the leading slash here to
- * avoid a double-slash that breaks ESP-IDF VFS prefix matching.          */
-#define BG_LV_FILE_FMT     "A:sdcard/walldisplay_theme/p%u_bg%u.jpg"
 #define BG_MAX_BYTES       (2u * 1024u * 1024u)
 #define BG_MIN_BYTES       4u
 #define BG_HTTP_BUFFER_BYTES 2048
 #define BG_HTTP_BUFFER_MIN_BYTES 512
-/* ESP-Hosted SDIO driver degrades under sustained inbound HTTPS traffic
- * (espressif/esp-hosted-mcu #167, #184).  Longer yields between reads
- * let the SDIO write task drain its queues between bursts.               */
-#define BG_READ_YIELD_MS    100
+#define BG_READ_YIELD_MS    0
+#define BG_POST_HTTP_SETTLE_MS 0
+#define BG_INTER_IMAGE_COOLDOWN_MS 0
 #define BG_FILE_CHUNK_BYTES 4096
 #define BG_PROGRESS_STEP_BYTES (48u * 1024u)
 #define BG_TASK_STACK      16384
@@ -51,9 +49,10 @@
  * previously-converted files (e.g. the v1 pixel-domain converter produced
  * corrupted output; v2 is the lossless transcoder).  On mismatch the
  * auto-download task deletes all images and re-downloads them.              */
-#define BG_CONV_VERSION    16
+#define BG_CONV_VERSION    19
 #define BG_NVS_NS          "ui_bg"
 #define BG_NVS_KEY_CONV    "conv_ver"
+#define BG_NVS_KEY_CONV_PRESET_FMT "conv_p%u"
 #define BG_NVS_KEY_DL_FAIL "dl_fail"   /* download crash counter */
 #define BG_NVS_KEY_DL_DONE "dl_done"   /* bitmask: bit N = image N saved OK */
 #define BG_NVS_KEY_DL_PSET "dl_pset"   /* preset index being downloaded */
@@ -67,64 +66,64 @@ static const char *TAG = "ui_bg";
 /* ------------------------------------------------------------------ */
 static const bg_preset_t s_presets[] = {
     {"Nature", {
-        "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1501785888041-af3ef285b470?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1511884642898-4c92249e20b6?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
+        "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1501785888041-af3ef285b470?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1511884642898-4c92249e20b6?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
     }},
     {"City", {
-        "https://images.unsplash.com/photo-1449824913935-59a10b8d2000?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1519501025264-65ba15a82390?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1494526585095-c41746248156?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1518005020951-eccb494ad742?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1496568816309-51d7c20e3b21?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1514565131-fce0801e5785?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1514924013411-cbf25faa35bb?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
+        "https://images.unsplash.com/photo-1449824913935-59a10b8d2000?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1519501025264-65ba15a82390?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1494526585095-c41746248156?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1518005020951-eccb494ad742?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1496568816309-51d7c20e3b21?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1514565131-fce0801e5785?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1514924013411-cbf25faa35bb?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
     }},
     {"Space", {
-        "https://images.unsplash.com/photo-1462331940025-496dfbfc7564?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1446776811953-b23d57bd21aa?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1451187580459-43490279c0fa?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1419242902214-272b3f66ee7a?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1447433819943-74a20887a81e?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1506318137071-a8e063b4bec0?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1516339901601-2e1b62dc0c45?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1534796636912-3b95b3ab5986?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
+        "https://images.unsplash.com/photo-1462331940025-496dfbfc7564?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1446776811953-b23d57bd21aa?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1451187580459-43490279c0fa?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1419242902214-272b3f66ee7a?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1447433819943-74a20887a81e?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1506318137071-a8e063b4bec0?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1516339901601-2e1b62dc0c45?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1534796636912-3b95b3ab5986?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
     }},
     {"Abstract", {
-        "https://images.unsplash.com/photo-1557683316-973673baf926?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1557682250-33bd709cbe85?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1550859492-d5da9d8e45f3?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1541701494587-cb58502866ab?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1558591710-4b4a1ae0f04d?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1558470598-a5dda9640f68?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1614850715649-1d0106293bd1?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
+        "https://images.unsplash.com/photo-1557683316-973673baf926?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1557682250-33bd709cbe85?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1550859492-d5da9d8e45f3?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1541701494587-cb58502866ab?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1558591710-4b4a1ae0f04d?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1558470598-a5dda9640f68?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1614850715649-1d0106293bd1?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
     }},
     {"Ocean", {
-        "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1471922694854-ff1b63b20054?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1500375592092-40eb2168fd21?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1439405326854-014607f694d7?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1505142468610-359e7d316be0?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1518837695005-2083093ee35b?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1500534623283-312aade485b7?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1519046904884-53103b34b206?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
+        "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1471922694854-ff1b63b20054?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1500375592092-40eb2168fd21?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1439405326854-014607f694d7?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1505142468610-359e7d316be0?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1518837695005-2083093ee35b?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1500534623283-312aade485b7?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1519046904884-53103b34b206?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
     }},
     {"Weather", {
-        "https://images.unsplash.com/photo-1504608524841-42fe6f032b4b?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1534088568595-a066f410bcda?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1501594907352-04cda38ebc29?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1499346030926-9a72daac6c63?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1527482797697-8795b05a13fe?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1504384308090-c894fdcc538d?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1515694346937-94d85e41e6f0?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
-        "https://images.unsplash.com/photo-1519681393784-d120267933ba?auto=format&fit=crop&w=720&h=720&q=75&fm=jpg",
+        "https://images.unsplash.com/photo-1504608524841-42fe6f032b4b?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1534088568595-a066f410bcda?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1501594907352-04cda38ebc29?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1499346030926-9a72daac6c63?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1527482797697-8795b05a13fe?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1504384308090-c894fdcc538d?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1515694346937-94d85e41e6f0?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1519681393784-d120267933ba?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
     }},
 };
 
@@ -169,6 +168,10 @@ static bg_screen_t s_screens[BG_MAX_SCREENS];
 static uint8_t s_screen_count;
 static lv_timer_t *s_timer;
 static uint8_t s_active_slot;
+
+/* Raw RGB565 image loaded from SD for LVGL display */
+static uint8_t *s_raw_pixels;
+static lv_image_dsc_t s_raw_dsc;
 static bool s_sd_background_allowed;
 static bool s_deferred_logged;
 static bool s_busy;
@@ -203,6 +206,80 @@ static void *bg_realloc(void *ptr, size_t size)
 static bool file_exists(const char *path)
 {
     return sd_storage_file_exists(path);
+}
+
+static void background_cache_version_key(uint8_t preset_index, char *key, size_t key_size)
+{
+    snprintf(key, key_size, BG_NVS_KEY_CONV_PRESET_FMT, (unsigned)preset_index);
+}
+
+static bool background_cache_version_current(uint8_t preset_index)
+{
+    char key[16];
+    background_cache_version_key(preset_index, key, sizeof(key));
+
+    nvs_handle_t h;
+    uint8_t ver = 0;
+    if (nvs_open(BG_NVS_NS, NVS_READONLY, &h) != ESP_OK) return false;
+    esp_err_t err = nvs_get_u8(h, key, &ver);
+    nvs_close(h);
+    return err == ESP_OK && ver == BG_CONV_VERSION;
+}
+
+static void mark_background_cache_current(uint8_t preset_index)
+{
+    char key[16];
+    background_cache_version_key(preset_index, key, sizeof(key));
+
+    nvs_handle_t h;
+    if (nvs_open(BG_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, BG_NVS_KEY_CONV, BG_CONV_VERSION);
+        nvs_set_u8(h, key, BG_CONV_VERSION);
+        nvs_erase_key(h, BG_NVS_KEY_DL_DONE);
+        nvs_erase_key(h, BG_NVS_KEY_DL_PSET);
+        nvs_set_u8(h, BG_NVS_KEY_DL_FAIL, 0);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static void clear_download_state_nvs(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(BG_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, BG_NVS_KEY_DL_FAIL, 0);
+        nvs_erase_key(h, BG_NVS_KEY_DL_DONE);
+        nvs_erase_key(h, BG_NVS_KEY_DL_PSET);
+        nvs_erase_key(h, BG_NVS_KEY_CONV);
+        for (uint8_t i = 0; i < PRESET_COUNT; i++) {
+            char key[16];
+            background_cache_version_key(i, key, sizeof(key));
+            nvs_erase_key(h, key);
+        }
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static int bg_recursive_delete(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) != 0) return errno == ENOENT ? 0 : -1;
+    if (!S_ISDIR(st.st_mode)) return remove(path);
+
+    DIR *dir = opendir(path);
+    if (!dir) return -1;
+    struct dirent *ent;
+    char child[160];
+    int ret = 0;
+    while ((ent = readdir(dir)) != NULL) {
+        if (!ent->d_name[0] || strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
+        if (bg_recursive_delete(child) != 0) ret = -1;
+    }
+    closedir(dir);
+    if (rmdir(path) != 0 && errno != ENOENT) ret = -1;
+    return ret;
 }
 
 static uint8_t opacity_from_percent(uint8_t pct)
@@ -268,13 +345,16 @@ static void clear_background_for_download(void)
     for (uint8_t i = 0; i < s_screen_count; i++) {
         bg_screen_t *s = &s_screens[i];
         if (!s->layer || !s->image || !s->scrim) continue;
-        lv_image_set_src(s->image, NULL);              /* release file ref */
-        lv_obj_add_flag(s->image, LV_OBJ_FLAG_HIDDEN); /* hide widget     */
+        lv_image_set_src(s->image, NULL);
+        lv_obj_add_flag(s->image, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_style_bg_color(s->layer, THEME_BG_COLOR, LV_PART_MAIN);
         lv_obj_set_style_bg_opa(s->layer, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_bg_opa(s->scrim, LV_OPA_TRANSP, LV_PART_MAIN);
     }
-    ESP_LOGI(TAG, "background images cleared for download (LVGL file refs released)");
+    free(s_raw_pixels);
+    s_raw_pixels = NULL;
+    memset(&s_raw_dsc, 0, sizeof(s_raw_dsc));
+    ESP_LOGI(TAG, "background images cleared for download");
 }
 
 static void slide_timer_cb(lv_timer_t *timer)
@@ -337,18 +417,58 @@ static void apply_background(void)
     uint8_t preset = cfg.background_preset;
     if (preset >= bg_preset_count()) preset = 0;
 
-    char lv_path[96];
-    snprintf(lv_path, sizeof(lv_path), BG_LV_FILE_FMT, (unsigned)preset, (unsigned)slot);
+    char raw_path[96];
+    snprintf(raw_path, sizeof(raw_path), BG_FILE_FMT, (unsigned)preset, (unsigned)slot);
 
-    ESP_LOGI(TAG, "apply_background: %s (slot %u, preset %u)", lv_path,
+    ESP_LOGI(TAG, "apply_background: %s (slot %u, preset %u)", raw_path,
              (unsigned)slot, (unsigned)preset);
+
+    /* Load raw RGB565 file: [u16 w][u16 h][u16 padded_w][u16 padded_h][pixels] */
+    FILE *rf = fopen(raw_path, "rb");
+    if (!rf) {
+        ESP_LOGW(TAG, "apply_background: cannot open %s", raw_path);
+        return;
+    }
+    uint16_t hdr[4];
+    if (fread(hdr, 1, sizeof(hdr), rf) != sizeof(hdr)) {
+        fclose(rf);
+        return;
+    }
+    uint16_t img_w = hdr[0], img_h = hdr[1];
+    uint16_t pad_w = hdr[2], pad_h = hdr[3];
+    size_t pixel_bytes = (size_t)pad_w * pad_h * 2;
+    uint8_t *new_pixels = heap_caps_malloc(pixel_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!new_pixels) {
+        fclose(rf);
+        ESP_LOGE(TAG, "apply_background: OOM for %ux%u pixels", pad_w, pad_h);
+        return;
+    }
+    size_t got = fread(new_pixels, 1, pixel_bytes, rf);
+    fclose(rf);
+    if (got != pixel_bytes) {
+        free(new_pixels);
+        ESP_LOGE(TAG, "apply_background: short read %u/%u", (unsigned)got, (unsigned)pixel_bytes);
+        return;
+    }
+
+    /* Swap in the new pixel buffer */
+    free(s_raw_pixels);
+    s_raw_pixels = new_pixels;
+    memset(&s_raw_dsc, 0, sizeof(s_raw_dsc));
+    s_raw_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    s_raw_dsc.header.w = pad_w;
+    s_raw_dsc.header.h = pad_h;
+    s_raw_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+    s_raw_dsc.header.stride = pad_w * 2;
+    s_raw_dsc.data_size = (uint32_t)pixel_bytes;
+    s_raw_dsc.data = s_raw_pixels;
 
     bool applied_to_any_screen = false;
     for (uint8_t i = 0; i < s_screen_count; i++) {
         bg_screen_t *s = &s_screens[i];
         if (!s->layer || !s->image || !s->scrim) continue;
         if (cfg.background_idle_only && !s->idle_weather) continue;
-        lv_image_set_src(s->image, lv_path);
+        lv_image_set_src(s->image, &s_raw_dsc);
         lv_obj_clear_flag(s->image, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_background(s->layer);
         lv_obj_set_style_bg_color(s->scrim, lv_color_black(), LV_PART_MAIN);
@@ -365,11 +485,13 @@ static void apply_background(void)
 
 void ui_background_pre_init(void)
 {
-    /* Check NVS *before* any subsystem can mount the SD card.
-     * SDMMC Slot 0 (SD) and Slot 1 (SDIO Wi-Fi) share the host controller.
-     * Once Slot 0 is initialised, sustained SDIO transfers on Slot 1 crash.
-     * If the auto-download task is going to need HTTPS, we must prevent the
-     * SD card from ever being mounted until all downloads finish.           */
+    esp_err_t hw_err = jpeg_hw_init();
+    if (hw_err != ESP_OK) {
+        ESP_LOGW(TAG, "pre-init: HW JPEG decoder unavailable: %s", esp_err_to_name(hw_err));
+    }
+
+    /* Check NVS before the UI starts so migration/download state is known
+     * while internal memory is still relatively unfragmented. */
     nvs_handle_t h;
     uint8_t ver = 0;
     uint8_t dl_fail = 0;
@@ -480,7 +602,7 @@ bool ui_background_preset_images_present(uint8_t preset_index,
 
     if (present_count) *present_count = present;
     if (total_count) *total_count = total;
-    return total > 0 && present >= total;
+    return total > 0 && present >= total && background_cache_version_current(preset_index);
 }
 
 static void set_busy(bool busy)
@@ -663,18 +785,12 @@ static void set_progress_status(uint8_t index, uint8_t total, size_t bytes, int6
 /**
  * Download a JPEG from @p url into a PSRAM buffer.
  *
- * Uses keep-alive connection reuse via @p p_client:
- *   - If *p_client is NULL, creates a new HTTP client (first image)
- *   - If *p_client is non-NULL, reuses the existing connection
- *   - On success, *p_client is updated for reuse by the next call
- *   - On error, *p_client is set to NULL (abandoned — next call retries)
+ * Reuses one keep-alive client for the batch.  Closing the TLS socket after
+ * each image can leave ESP-Hosted SDIO in an unrecoverable state; defer that
+ * close until every image has already been saved.
  *
- * The caller is responsible for final cleanup after all images finish.
- * This avoids repeated TLS handshakes which crash the ESP-Hosted SDIO
- * driver (espressif/esp-hosted-mcu #167, #184).  One TLS handshake for
- * the first image; subsequent images reuse the session.
- *
- * Reads are paced with BG_READ_YIELD_MS gaps to let SDIO queues drain.
+ * Reads run without artificial pacing; the batch-level network/SD gates keep
+ * SD card access out of the HTTPS phase.
  */
 static esp_err_t download_http_jpeg_to_memory(const char *url,
                                               uint8_t index,
@@ -698,7 +814,7 @@ static esp_err_t download_http_jpeg_to_memory(const char *url,
 
     set_statusf("Image %u/%u: connecting", (unsigned)(index + 1), (unsigned)total);
 
-    /* Reuse existing client (keep-alive) or create a new one. */
+    /* Reuse the batch client when possible. */
     esp_http_client_handle_t client = *p_client;
     if (!client) {
         esp_http_client_config_t http_cfg = {
@@ -707,7 +823,7 @@ static esp_err_t download_http_jpeg_to_memory(const char *url,
             .buffer_size = (int)http_buffer_size,
             .buffer_size_tx = 512,
             .crt_bundle_attach = esp_crt_bundle_attach,
-            .max_redirection_count = 0,        /* manual redirect handling */
+            .max_redirection_count = 3,
             .user_agent = "P4-WallDisplay/1.0",
             .keep_alive_enable = true,
         };
@@ -715,7 +831,7 @@ static esp_err_t download_http_jpeg_to_memory(const char *url,
         if (!client) return ESP_ERR_NO_MEM;
         (void)esp_http_client_set_header(client, "Accept",
             "image/jpeg,image/jpg;q=0.9,image/*;q=0.4,*/*;q=0.1");
-        ESP_LOGI(TAG, "dl: new keep-alive client for %s", url);
+        ESP_LOGI(TAG, "dl: new keep-alive HTTP client for %s", url);
     } else {
         esp_http_client_set_url(client, url);
     }
@@ -817,7 +933,9 @@ static esp_err_t download_http_jpeg_to_memory(const char *url,
         }
 
         bytes += (size_t)read_len;
-        vTaskDelay(pdMS_TO_TICKS(BG_READ_YIELD_MS));
+        if (BG_READ_YIELD_MS > 0) {
+            vTaskDelay(pdMS_TO_TICKS(BG_READ_YIELD_MS));
+        }
 
         if (!signature_checked && bytes >= 2) {
             signature_checked = true;
@@ -847,13 +965,18 @@ static esp_err_t download_http_jpeg_to_memory(const char *url,
 
     if (err == ESP_OK) set_progress_status(index, total, bytes, content_len);
 
-    /* On success: hand client back for keep-alive reuse.
-     * On error:   abandon client (don't attempt close — might crash SDIO).
-     *             Next call will create a fresh connection.                */
+    /* On success: hand the client back so the caller can reuse it for the batch.
+     * On error:   clean up the client to free TLS/internal-RAM resources.
+     *             The old "abandon" strategy leaked ~20 KB of mbedTLS
+     *             buffers per failed attempt.                              */
     if (err == ESP_OK) {
         *p_client = client;
     } else {
-        ESP_LOGW(TAG, "dl: error %s — abandoning client", esp_err_to_name(err));
+        ESP_LOGW(TAG, "dl: error %s — closing client", esp_err_to_name(err));
+        if (client) {
+            if (client_open) esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+        }
         *p_client = NULL;
     }
 
@@ -959,19 +1082,14 @@ cleanup:
 
 /* ── Image download queue ──────────────────────────────────────
  *
- * Downloads JPEG images sequentially through a single keep-alive
- * HTTPS connection.  Only one TLS handshake for the entire batch;
- * subsequent images reuse the session — this avoids the repeated
- * TLS-handshake crashes in the ESP-Hosted SDIO driver
- * (espressif/esp-hosted-mcu #167, #184).
+ * Downloads JPEG images sequentially with a batch keep-alive HTTPS client.
  *
  * After each image is downloaded to PSRAM it is written to SD in
  * small chunks and (if progressive) transcoded to baseline JPEG.
  * The optional on_saved callback fires per image so the caller
  * can persist config or NVS state incrementally.
  *
- * Final HTTP client cleanup happens after ALL items are processed.
- * If cleanup crashes SDIO, every image is already on disk.
+ * Each image is fully downloaded before SD writes or JPEG conversion run.
  *
  * Usage:
  *   bg_dl_queue_t q;
@@ -1044,16 +1162,87 @@ static void bg_dl_queue_skip_existing(bg_dl_queue_t *q)
     }
 }
 
+static void bg_download_pause_sd(bool *paused)
+{
+    if (!paused || *paused) return;
+    sd_storage_pause();
+    *paused = true;
+}
+
+static void bg_download_resume_sd(bool *paused)
+{
+    if (!paused || !*paused) return;
+    sd_storage_resume();
+    *paused = false;
+}
+
+static bool bg_download_wait_wifi_ready(uint32_t timeout_ms, uint32_t stable_ms)
+{
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    TickType_t ready_since = 0;
+    while (xTaskGetTickCount() < deadline) {
+        services_status_t service_status;
+        services_status_get(&service_status);
+        bool ready = service_status.wifi_connected &&
+                     service_status.ip_addr[0] &&
+                     strcmp(service_status.ip_addr, "-") != 0;
+        if (ready) {
+            TickType_t now = xTaskGetTickCount();
+            if (ready_since == 0) ready_since = now;
+            if ((now - ready_since) >= pdMS_TO_TICKS(stable_ms)) return true;
+        } else {
+            ready_since = 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+    return false;
+}
+
+static void bg_download_reset_wifi_link(const char *status_text, const char *log_text)
+{
+    set_statusf("%s", status_text);
+    ESP_LOGW(TAG, "%s", log_text);
+    esp_err_t reset_err = services_reset_wifi_link();
+    if (reset_err != ESP_OK) {
+        ESP_LOGW(TAG, "Wi-Fi link reset failed: %s", esp_err_to_name(reset_err));
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        return;
+    }
+    if (!bg_download_wait_wifi_ready(30000, 2500)) {
+        ESP_LOGW(TAG, "Wi-Fi link reset did not reconnect before timeout");
+    } else {
+        ESP_LOGI(TAG, "Wi-Fi link reset and reconnected");
+    }
+}
+
+static void bg_download_recover_wifi_link(esp_err_t err)
+{
+    if (err == ESP_ERR_INVALID_STATE) {
+        set_statusf("Waiting for Wi-Fi link");
+        ESP_LOGW(TAG, "download failed; waiting for Wi-Fi before retry");
+        if (bg_download_wait_wifi_ready(20000, 2500)) return;
+    } else if (err != ESP_ERR_HTTP_CONNECT && err != ESP_FAIL && err != ESP_ERR_TIMEOUT) {
+        return;
+    }
+    bg_download_reset_wifi_link("Recovering Wi-Fi link",
+                                "download failed; resetting hosted Wi-Fi link before retry");
+}
+
 static void bg_dl_queue_run(bg_dl_queue_t *q)
 {
-    (void)sd_storage_ensure_dir(BG_DIR);
-
     uint8_t to_download = q->count - q->skipped;
     uint8_t dl_index = 0;   /* 0-based counter of non-skipped items */
+    bool sd_paused = false;
+    esp_http_client_handle_t client = NULL;
 
     if (q->skipped > 0) {
         ESP_LOGI(TAG, "download queue: %u already on disk, downloading %u",
                  q->skipped, to_download);
+    }
+
+    if (to_download > 0) {
+        services_network_bulk_begin();
+        bg_download_pause_sd(&sd_paused);
     }
 
     for (uint8_t i = 0; i < q->count; i++) {
@@ -1068,17 +1257,14 @@ static void bg_dl_queue_run(bg_dl_queue_t *q)
         set_item_progress(i, q->count, 0);
 
         /* ── Download to PSRAM ──
-         * Each image gets its own HTTPS lock + fresh HTTP client so the
-         * SDIO bus is completely idle between images.  The ESP-Hosted
-         * SDIO driver (espressif/esp-hosted-mcu #167, #184) degrades
-         * under sustained inbound HTTPS — capping each burst to one
-         * image and closing the TLS session afterwards keeps the link
-         * healthy.                                                      */
+         * The SDIO bus is fragile under sustained HTTPS (espressif/
+         * esp-hosted-mcu #167, #184).  Keep the HTTPS mutex held
+         * through the entire download + SD-write cycle so nothing else
+         * touches the SDIO bus between images.                      */
         uint8_t  *data = NULL;
         size_t    bytes = 0;
         int       http_status = 0;
         esp_err_t err = ESP_FAIL;
-        esp_http_client_handle_t client = NULL;
 
         for (uint8_t attempt = 0; attempt <= q->max_retries; attempt++) {
             if (attempt > 0) {
@@ -1087,6 +1273,14 @@ static void bg_dl_queue_run(bg_dl_queue_t *q)
                 set_statusf("Image %u/%u: retry %u",
                             (unsigned)dl_index, (unsigned)to_download, attempt);
                 vTaskDelay(pdMS_TO_TICKS(3000));
+            }
+
+            if (!bg_download_wait_wifi_ready(30000, 1000)) {
+                err = ESP_ERR_INVALID_STATE;
+                ESP_LOGW(TAG, "  Wi-Fi not ready before image %u attempt %u",
+                         dl_index, attempt + 1);
+                bg_download_recover_wifi_link(err);
+                continue;
             }
 
             services_https_lock();
@@ -1100,24 +1294,22 @@ static void bg_dl_queue_run(bg_dl_queue_t *q)
                 BG_HTTP_BUFFER_BYTES,
                 &client, &data, &bytes, &http_status);
 
-            /* Close the HTTP client immediately — end TLS session so
-             * the SDIO bus goes fully idle before the next image.    */
-            if (client) {
-                esp_http_client_close(client);
-                esp_http_client_cleanup(client);
-                client = NULL;
+            if (BG_POST_HTTP_SETTLE_MS > 0) {
+                vTaskDelay(pdMS_TO_TICKS(BG_POST_HTTP_SETTLE_MS));
             }
 
             sd_storage_set_network_busy(false);
-            services_https_unlock();
 
             if (err == ESP_OK && data) break;
+
+            services_https_unlock();
 
             /* Download failed — free partial data and retry */
             if (data) { free(data); data = NULL; }
 
             ESP_LOGW(TAG, "  attempt %u failed: %s (http %d)",
                      attempt + 1, esp_err_to_name(err), http_status);
+            bg_download_recover_wifi_link(err);
         }
 
         ESP_LOGI(TAG, "  [%u/%u] download %s, %u bytes, http %d",
@@ -1132,40 +1324,83 @@ static void bg_dl_queue_run(bg_dl_queue_t *q)
                         (unsigned)dl_index, (unsigned)to_download,
                         q->last_error);
             if (data) free(data);
-            vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
 
-        /* ── Write to SD (atomic via tmp → rename) ──
-         * HTTPS lock is released — weather/GeoIP can run while we
-         * write to SD.  SDIO bus is idle during this phase.         */
-        esp_err_t sd_err = sd_storage_ensure_mounted();
+        /* ── Progressive → baseline if needed (HW decoder requires baseline) ── */
+        uint8_t *baseline = data;
+        size_t baseline_len = bytes;
+        bool converted = false;
+        if (bytes >= 4) {
+            bool is_progressive = false;
+            for (size_t j = 0; j + 1 < bytes; j++) {
+                if (data[j] == 0xFF && data[j + 1] == 0xC2) { is_progressive = true; break; }
+                if (data[j] == 0xFF && data[j + 1] == 0xC0) break;
+            }
+            if (is_progressive) {
+                set_statusf("Converting image %u/%u",
+                            (unsigned)dl_index, (unsigned)to_download);
+                /* Write JPEG to tmp, convert in-place, read back */
+                bg_download_resume_sd(&sd_paused);
+                esp_err_t sd_err = sd_storage_ensure_dir(BG_DIR);
+                if (sd_err == ESP_OK) {
+                    esp_err_t werr = write_jpeg_memory_to_tmp(item->tmp, data, bytes);
+                    if (werr == ESP_OK) {
+                        esp_err_t conv = jpeg_progressive_to_baseline(item->tmp);
+                        if (conv == ESP_OK) {
+                            free(data); data = NULL;
+                            FILE *cf = fopen(item->tmp, "rb");
+                            if (cf) {
+                                fseek(cf, 0, SEEK_END);
+                                baseline_len = (size_t)ftell(cf);
+                                fseek(cf, 0, SEEK_SET);
+                                baseline = bg_malloc(baseline_len);
+                                if (baseline && fread(baseline, 1, baseline_len, cf) == baseline_len) {
+                                    converted = true;
+                                } else {
+                                    free(baseline); baseline = data; baseline_len = bytes;
+                                }
+                                fclose(cf);
+                            }
+                            remove(item->tmp);
+                        } else {
+                            remove(item->tmp);
+                        }
+                    }
+                    bg_download_pause_sd(&sd_paused);
+                }
+            }
+        }
+
+        /* ── HW JPEG decode → raw RGB565 on SD ── */
+        set_statusf("Decoding image %u/%u",
+                    (unsigned)dl_index, (unsigned)to_download);
+
+        bg_download_resume_sd(&sd_paused);
+        esp_err_t sd_err = sd_storage_ensure_dir(BG_DIR);
         if (sd_err != ESP_OK) {
             q->failed++;
-            free(data);
+            if (converted) free(baseline); else free(data);
+            data = NULL;
             set_statusf("Image %u/%u: SD not available",
                         (unsigned)dl_index, (unsigned)to_download);
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            continue;
+            services_https_unlock();
+            goto after_item;
         }
 
-        (void)sd_storage_ensure_dir(BG_DIR);
-
-        set_statusf("Saving image %u/%u (%u KB)",
-                    (unsigned)dl_index, (unsigned)to_download,
-                    (unsigned)(bytes / 1024u));
-
-        esp_err_t werr = write_jpeg_memory_to_tmp(item->tmp, data, bytes);
-        free(data);
+        remove(item->tmp);
+        esp_err_t hw_err = jpeg_hw_decode_to_file(baseline, baseline_len, item->tmp);
+        if (converted) free(baseline); else free(data);
         data = NULL;
 
-        if (werr != ESP_OK) {
+        if (hw_err != ESP_OK) {
             remove(item->tmp);
             q->failed++;
-            format_download_error(q->last_error, sizeof(q->last_error), werr, 0);
-            set_statusf("Image %u/%u: write failed",
+            format_download_error(q->last_error, sizeof(q->last_error), hw_err, 0);
+            set_statusf("Image %u/%u: decode failed",
                         (unsigned)dl_index, (unsigned)to_download);
-            continue;
+            services_https_unlock();
+            goto after_item;
         }
 
         remove(item->dest);
@@ -1174,18 +1409,8 @@ static void bg_dl_queue_run(bg_dl_queue_t *q)
                      item->tmp, item->dest, errno);
             remove(item->tmp);
             q->failed++;
-            continue;
-        }
-
-        /* ── Convert progressive → baseline JPEG ── */
-        set_statusf("Converting image %u/%u",
-                    (unsigned)dl_index, (unsigned)to_download);
-        esp_err_t conv = jpeg_progressive_to_baseline(item->dest);
-        if (conv == ESP_OK) {
-            ESP_LOGI(TAG, "  converted progressive->baseline");
-        } else if (conv != ESP_ERR_NOT_SUPPORTED) {
-            ESP_LOGW(TAG, "  conversion failed: %s",
-                     esp_err_to_name(conv));
+            services_https_unlock();
+            goto after_item;
         }
 
         q->succeeded++;
@@ -1198,22 +1423,43 @@ static void bg_dl_queue_run(bg_dl_queue_t *q)
         set_statusf("%u/%u images ready",
                     (unsigned)total_done, (unsigned)q->count);
 
-        /* Notify caller for incremental config / NVS updates */
         if (q->on_saved) {
             q->on_saved(i, item->tag, item->dest, bytes, q->ctx);
         }
 
-        /* Inter-image SDIO cooldown — bus is fully idle (client closed,
-         * HTTPS lock released).  Gives the SDIO driver time to clear
-         * any residual internal state before the next TLS handshake.   */
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        services_https_unlock();
+
+after_item:
+        if (dl_index < to_download) {
+            bg_download_pause_sd(&sd_paused);
+            if (BG_INTER_IMAGE_COOLDOWN_MS > 0) {
+                vTaskDelay(pdMS_TO_TICKS(BG_INTER_IMAGE_COOLDOWN_MS));
+            }
+        }
     }
+
+    if (client) {
+        services_https_lock();
+        sd_storage_set_network_busy(true);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        client = NULL;
+        if (BG_POST_HTTP_SETTLE_MS > 0) {
+            vTaskDelay(pdMS_TO_TICKS(BG_POST_HTTP_SETTLE_MS));
+        }
+        sd_storage_set_network_busy(false);
+        services_https_unlock();
+    }
+
+    bg_download_resume_sd(&sd_paused);
+    if (to_download > 0) services_network_bulk_end();
 }
 
 /* ── Manual download (UI-triggered) ────────────────────────── */
 
 typedef struct {
     bool replace_collection;
+    bool bulk_claimed;
     uint8_t preset_index;
     uint8_t url_count;
     char urls[APP_THEME_MAX_IMAGES][256];
@@ -1225,6 +1471,14 @@ static void finish_download_ui(const char *message)
         ui_background_refresh();
         toast_show(message);
         bsp_display_unlock();
+    }
+}
+
+static void download_req_release_bulk(download_req_t *req)
+{
+    if (req && req->bulk_claimed) {
+        services_network_bulk_end();
+        req->bulk_claimed = false;
     }
 }
 
@@ -1346,6 +1600,9 @@ static void download_task(void *arg)
 
         /* Display result */
         if (q.succeeded > 0) {
+            if (req->replace_collection && q.succeeded >= total && q.failed == 0) {
+                mark_background_cache_current(req->preset_index);
+            }
             if (q.failed) set_statusf("Saved %u/%u images",
                                        (unsigned)q.succeeded, (unsigned)total);
             else set_statusf("Saved %u images", (unsigned)q.succeeded);
@@ -1362,6 +1619,7 @@ static void download_task(void *arg)
         ESP_LOGW(TAG, "background download failed: %s", esp_err_to_name(err));
     }
 
+    download_req_release_bulk(req);
     set_busy(false);
     free(req);
     vTaskDelete(NULL);
@@ -1382,11 +1640,14 @@ static esp_err_t start_download_request(download_req_t *req)
     set_statusf(req->url_count > 1 ? "Downloading %u images" : "Downloading background",
                 (unsigned)req->url_count);
     set_progress(1, req->url_count, true, 0);
+    services_network_bulk_begin();
+    req->bulk_claimed = true;
 
     BaseType_t ok = xTaskCreateWithCaps(download_task, "bg_download", BG_TASK_STACK, req, 5,
                                         NULL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ok != pdPASS) ok = xTaskCreate(download_task, "bg_download", BG_TASK_STACK, req, 5, NULL);
     if (ok != pdPASS) {
+        download_req_release_bulk(req);
         set_busy(false);
         free(req);
         set_statusf("Unable to start image loader");
@@ -1444,17 +1705,7 @@ esp_err_t ui_background_download_collection_start(const char *const *urls,
 esp_err_t ui_background_clear_images(void)
 {
     /* Reset all download state so auto-download starts fresh */
-    {
-        nvs_handle_t h;
-        if (nvs_open(BG_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
-            nvs_set_u8(h, BG_NVS_KEY_DL_FAIL, 0);
-            nvs_erase_key(h, BG_NVS_KEY_DL_DONE);
-            nvs_erase_key(h, BG_NVS_KEY_DL_PSET);
-            nvs_erase_key(h, BG_NVS_KEY_CONV);
-            nvs_commit(h);
-            nvs_close(h);
-        }
-    }
+    clear_download_state_nvs();
     esp_err_t err = app_config_theme_clear();
     esp_err_t sd_err = sd_storage_ensure_mounted();
     if (sd_err == ESP_OK) {
@@ -1479,6 +1730,54 @@ esp_err_t ui_background_clear_images(void)
     }
     ui_background_refresh();
     return err;
+}
+
+esp_err_t ui_background_delete_folder(void)
+{
+    if (ui_background_is_busy()) {
+        set_statusf("Background download busy");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    clear_download_state_nvs();
+    esp_err_t cfg_err = app_config_theme_clear();
+
+    if (bsp_display_lock(pdMS_TO_TICKS(1000))) {
+        clear_background_for_download();
+        bsp_display_unlock();
+    } else {
+        s_sd_background_allowed = false;
+        ESP_LOGW(TAG, "background folder delete could not acquire display lock");
+    }
+
+    esp_err_t sd_err = sd_storage_ensure_mounted();
+    int del_ret = -1;
+    if (sd_err == ESP_OK) {
+        del_ret = bg_recursive_delete(BG_DIR);
+    } else {
+        ESP_LOGW(TAG, "background folder delete could not access SD: %s", esp_err_to_name(sd_err));
+    }
+
+    if (cfg_err == ESP_OK && sd_err == ESP_OK && del_ret == 0) {
+        set_statusf("Background folder deleted");
+    } else if (sd_err != ESP_OK) {
+        set_statusf("Folder delete failed: %s", sd_storage_last_error());
+    } else if (del_ret != 0) {
+        set_statusf("Folder delete failed: %s", strerror(errno));
+    } else {
+        set_statusf("Theme reset failed: %s", esp_err_to_name(cfg_err));
+    }
+
+    if (bsp_display_lock(pdMS_TO_TICKS(1000))) {
+        ui_background_refresh();
+        bsp_display_unlock();
+    } else {
+        ESP_LOGW(TAG, "background folder delete could not refresh UI");
+    }
+
+    if (cfg_err != ESP_OK) return cfg_err;
+    if (sd_err != ESP_OK) return sd_err;
+    return del_ret == 0 ? ESP_OK : ESP_FAIL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1542,8 +1841,7 @@ static void auto_download_task(void *arg)
         }
     }
 
-    /* Download queue handles: keep-alive connection, paced reads,
-     * SD writes, JPEG conversion, and per-image NVS progress.     */
+    /* Download queue handles SD writes, JPEG conversion, and per-image NVS progress. */
 
     uint8_t total_presets = bg_preset_count();
     app_theme_config_t dl_cfg;
@@ -1654,13 +1952,15 @@ done:
         nvs_handle_t h;
         if (nvs_open(BG_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
             if (written_ok >= total_images) {
-                nvs_set_u8(h, BG_NVS_KEY_CONV, BG_CONV_VERSION);
-                nvs_erase_key(h, BG_NVS_KEY_DL_DONE);
-                nvs_erase_key(h, BG_NVS_KEY_DL_PSET);
+                nvs_close(h);
+                mark_background_cache_current(active_preset);
+                h = 0;
             }
-            nvs_set_u8(h, BG_NVS_KEY_DL_FAIL, 0);
-            nvs_commit(h);
-            nvs_close(h);
+            if (h) {
+                nvs_set_u8(h, BG_NVS_KEY_DL_FAIL, 0);
+                nvs_commit(h);
+                nvs_close(h);
+            }
         }
     }
 
@@ -1680,27 +1980,6 @@ finish:
     s_migration_pending = false;
 
 refresh:
-
-    /* Convert any remaining progressive JPEGs (pre-existing files that
-     * weren't downloaded this session).                                 */
-    {
-        uint8_t converted = 0;
-        for (uint8_t p = 0; p < total_presets; p++) {
-            uint8_t url_count = bg_preset_url_count(p);
-            for (uint8_t i = 0; i < url_count; i++) {
-                char path[80];
-                snprintf(path, sizeof(path), BG_FILE_FMT, (unsigned)p, (unsigned)i);
-                if (!file_exists(path)) continue;
-                esp_err_t conv = jpeg_progressive_to_baseline(path);
-                if (conv == ESP_OK) {
-                    converted++;
-                    ESP_LOGI(TAG, "auto-download: converted %s progressive->baseline", path);
-                }
-            }
-        }
-        if (converted > 0)
-            ESP_LOGI(TAG, "auto-download: converted %u images to baseline", converted);
-    }
 
     /* Make sure the active preset's images are enabled and refresh display */
     {

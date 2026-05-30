@@ -106,7 +106,7 @@ Audio sync is UDP, not RS-485 JSON. The S3 firmware must use WLED-MM/MoonModules
 | UDP port | `11988` | WLED-MM audio-sync receive port. |
 | Sync group | `1` | Must match WLED sync config. |
 | Send interval | at least 22 ms between packets | About 43 packets per second. |
-| Packet format | 40-byte WLED-MM `audioSyncPacket` | Contains raw/smoothed sample, peak flag, 16 FFT bins, magnitude, and major peak. |
+| Packet format | 44-byte WLED-MM v2 `audioSyncPacket` | Header `"00002"`, optional pressure/zero-crossing fields, raw/smoothed sample, frame counter, peak flag, 16 FFT bins, magnitude, and major peak. |
 
 ## Snapshot Fields Read By P4
 

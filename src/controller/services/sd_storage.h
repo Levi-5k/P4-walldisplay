@@ -16,24 +16,21 @@ bool sd_storage_file_exists(const char *path);
 const char *sd_storage_last_error(void);
 
 /**
- * Unmount the SD card and prevent remounting until sd_storage_resume() is
- * called.  This is needed because SDMMC Slot 0 (SD card) and Slot 1
- * (Wi-Fi SDIO) share the SDMMC host controller — having both active
- * simultaneously crashes the SDIO link.
+ * Prevent app-level SD access until sd_storage_resume() is called.
+ * SDMMC Slot 0 (SD card) and Slot 1 (Wi-Fi SDIO) share host resources,
+ * so long HTTPS transfers must not race with filesystem activity.
  *
- * Safe to call while Wi-Fi is connected: the unmount calls
- * sdmmc_host_deinit_slot(0) which only deinits Slot 0; the SDMMC host
- * and Slot 1 (Wi-Fi SDIO) remain fully operational.  The next call to
- * sd_storage_ensure_mounted() after sd_storage_resume() reinits Slot 0
- * and remounts the FAT filesystem.
+ * The card is intentionally left mounted.  Physically unmounting Slot 0
+ * can deinitialize shared SDMMC host state that ESP-Hosted Wi-Fi still
+ * needs on Slot 1.
  *
  * Typical usage in download tasks:
- *   sd_storage_pause();              // deinit Slot 0
+ *   sd_storage_pause();              // block app SD access
  *   ... HTTPS downloads to PSRAM ... // only Slot 1 active
  *   esp_http_client_cleanup(client);
  *   vTaskDelay(2500);                // let TCP FIN flush
- *   sd_storage_resume();             // allow Slot 0 reinit
- *   sd_storage_ensure_dir(...);      // remounts SD, safe
+ *   sd_storage_resume();             // allow SD access
+ *   sd_storage_ensure_dir(...);
  *   ... write PSRAM to SD ...
  */
 void sd_storage_pause(void);

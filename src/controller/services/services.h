@@ -30,6 +30,10 @@ typedef struct {
 	bool rs485_ready;
 	bool wled_online;
 	uint32_t wled_last_rx_ms;
+	uint32_t rs485_tx_lines;
+	uint32_t rs485_rx_lines;
+	uint32_t rs485_dropped_tx;
+	uint32_t rs485_rx_overflows;
 
 	bool weather_configured;
 	bool weather_online;
@@ -77,6 +81,12 @@ esp_err_t services_reset_wifi_link(void);
 void services_https_lock(void);
 void services_https_unlock(void);
 
+/* Mark a bulk hosted-Wi-Fi transfer as active so background network senders
+ * can stand down until the transfer finishes. */
+void services_network_bulk_begin(void);
+void services_network_bulk_end(void);
+bool services_network_bulk_active(void);
+
 /* Retry IP-based location lookup when weather needs coordinates after boot. */
 esp_err_t services_location_request_refresh(void);
 
@@ -97,12 +107,18 @@ esp_err_t audio_fft_init(void);
 /* UDP broadcast of normalized audio levels to WLED nodes. */
 esp_err_t sound_sync_tx_init(void);
 
-/* Push NVS-stored Wi-Fi credentials/base config to WLED over RS-485.
- * Safe to call again after credentials change. */
+/* Boot-time WLED provisioning. Skips the push if WLED already responds. */
 esp_err_t provision_init(void);
+
+/* Force-push NVS-stored Wi-Fi credentials/base config to WLED over RS-485.
+ * Use after credentials change so the S3 can reconnect without rebooting. */
+esp_err_t provision_wifi_update(void);
 
 /* Periodic WLED heartbeat over RS-485. */
 esp_err_t link_health_init(void);
+
+/* USB serial diagnostic commands for local hardware debugging. */
+esp_err_t serial_debug_init(void);
 
 #ifdef __cplusplus
 }

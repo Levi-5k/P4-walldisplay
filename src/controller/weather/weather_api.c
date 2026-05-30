@@ -416,6 +416,8 @@ static esp_err_t parse_forecast(const char *json, size_t len, weather_state_t *s
 static esp_err_t http_get(const char *url, http_body_t *body, int *out_status,
                           uint32_t timeout_ms)
 {
+    if (services_network_bulk_active()) return ESP_ERR_INVALID_STATE;
+
     esp_http_client_config_t http_cfg = {
         .url = url,
         .timeout_ms = timeout_ms,

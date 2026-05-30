@@ -1,8 +1,8 @@
 #include "sd_storage.h"
 
+#include "board_power.h"
 #include "bsp/esp-bsp.h"
 #include "driver/sdmmc_host.h"
-#include "esp_ldo_regulator.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
@@ -84,13 +84,7 @@ static esp_err_t make_tmp_path(const char *path, char *tmp_path, size_t tmp_len)
 
 static esp_err_t ensure_sd_power(void)
 {
-    static esp_ldo_channel_handle_t s_sd_ldo;
-    if (s_sd_ldo) return ESP_OK;
-    esp_ldo_channel_config_t ldo_cfg = {
-        .chan_id = 4,
-        .voltage_mv = 3300,
-    };
-    return esp_ldo_acquire_channel(&ldo_cfg, &s_sd_ldo);
+    return board_power_enable_vo4_3v3();
 }
 
 static esp_err_t mount_sd_locked(void)
@@ -196,9 +190,9 @@ void sd_storage_pause(void)
     if (mutex) xSemaphoreTake(mutex, portMAX_DELAY);
     s_paused = true;
     s_last_attempt_tick = 0;   /* clear retry cooldown */
-    esp_err_t err = unmount_sd_locked();
-    ESP_LOGI(TAG, "pause: unmount returned %s, mounted=%d",
-             esp_err_to_name(err), s_mounted);
+    set_last_error("SD access paused", ESP_OK);
+    ESP_LOGI(TAG, "pause: SD left mounted to preserve hosted SDIO state (mounted=%d)",
+             s_mounted);
     if (mutex) xSemaphoreGive(mutex);
 }
 

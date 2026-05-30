@@ -49,6 +49,7 @@ esp_err_t ui_background_download_collection_start(const char *const *urls,
                                                    uint8_t url_count,
                                                    uint8_t preset_index);
 esp_err_t ui_background_clear_images(void);
+esp_err_t ui_background_delete_folder(void);
 bool ui_background_is_busy(void);
 const char *ui_background_status(void);
 void ui_background_download_state_get(ui_background_download_state_t *out);

@@ -24,6 +24,8 @@ enum {
 static lv_obj_t *s_idle_scr;
 static lv_obj_t *s_main_scr;
 static bool      s_idle_active;
+static bool      s_idle_inhibited;
+static uint32_t  s_idle_snooze_until_ms;
 static lv_timer_t *s_idle_timer;
 static lv_timer_t *s_wake_lights_timer;
 static bool s_wake_lights_timer_on;
@@ -54,6 +56,23 @@ static int32_t clamp_i32(int32_t value, int32_t min_value, int32_t max_value)
     if (value < min_value) return min_value;
     if (value > max_value) return max_value;
     return value;
+}
+
+static lv_color_t wake_timer_urgency_color(uint32_t urgency)
+{
+    if (urgency >= 900u) return lv_color_hex(0xFF4D4D);
+    if (urgency >= 750u) return lv_color_hex(0xFF8A1F);
+    if (urgency >= 500u) return lv_color_hex(0xFFB347);
+    return THEME_PRIMARY_COLOR;
+}
+
+static void wake_timer_set_center_default(void)
+{
+    lv_display_t *display = lv_display_get_default();
+    int32_t screen_w = display ? lv_display_get_horizontal_resolution(display) : 720;
+    int32_t screen_h = display ? lv_display_get_vertical_resolution(display) : 720;
+    s_wake_timer_x = (screen_w - WAKE_TIMER_PANEL_W) / 2;
+    s_wake_timer_y = (screen_h - WAKE_TIMER_PANEL_H) / 2;
 }
 
 static void wake_timer_apply_pos(lv_obj_t *obj, int32_t x, int32_t y)
@@ -129,8 +148,11 @@ static void wake_timer_ensure_panel(void)
     lv_obj_set_style_radius(s_wake_timer_panel, 12, LV_PART_MAIN);
     lv_obj_set_style_pad_all(s_wake_timer_panel, 18, LV_PART_MAIN);
     lv_obj_set_style_pad_column(s_wake_timer_panel, 18, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(s_wake_timer_panel, 0, LV_PART_MAIN);
-    lv_obj_set_style_shadow_opa(s_wake_timer_panel, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_shadow_color(s_wake_timer_panel, THEME_PRIMARY_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(s_wake_timer_panel, 14, LV_PART_MAIN);
+    lv_obj_set_style_shadow_opa(s_wake_timer_panel, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_shadow_ofs_x(s_wake_timer_panel, 0, LV_PART_MAIN);
+    lv_obj_set_style_shadow_ofs_y(s_wake_timer_panel, 4, LV_PART_MAIN);
     lv_obj_set_flex_flow(s_wake_timer_panel, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(s_wake_timer_panel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_add_flag(s_wake_timer_panel, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_FLOATING);
@@ -186,13 +208,41 @@ static void wake_timer_ensure_panel(void)
     lv_obj_clear_flag(grip, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
 
     if (s_wake_timer_x < 0 || s_wake_timer_y < 0) {
-        lv_display_t *display = lv_display_get_default();
-        int32_t screen_w = display ? lv_display_get_horizontal_resolution(display) : 720;
-        s_wake_timer_x = screen_w - WAKE_TIMER_PANEL_W - 18;
-        s_wake_timer_y = 84;
+        wake_timer_set_center_default();
     }
     wake_timer_apply_pos(s_wake_timer_panel, s_wake_timer_x, s_wake_timer_y);
     lv_obj_move_foreground(s_wake_timer_panel);
+}
+
+static void wake_timer_apply_glow(uint32_t remaining_progress)
+{
+    if (remaining_progress > 1000u) remaining_progress = 1000u;
+    uint32_t urgency = 1000u - remaining_progress;
+    lv_color_t glow_color = wake_timer_urgency_color(urgency);
+    int32_t glow_width = 14 + (int32_t)((urgency * 30u) / 1000u);
+    lv_opa_t glow_opa = (lv_opa_t)(LV_OPA_30 + (int32_t)((urgency * 55u) / 1000u));
+    int32_t glow_y = 4 + (int32_t)((urgency * 4u) / 1000u);
+
+    if (s_wake_timer_panel) {
+        if (!lv_color_eq(lv_obj_get_style_border_color(s_wake_timer_panel, LV_PART_MAIN), glow_color)) {
+            lv_obj_set_style_border_color(s_wake_timer_panel, glow_color, LV_PART_MAIN);
+        }
+        if (!lv_color_eq(lv_obj_get_style_shadow_color(s_wake_timer_panel, LV_PART_MAIN), glow_color)) {
+            lv_obj_set_style_shadow_color(s_wake_timer_panel, glow_color, LV_PART_MAIN);
+        }
+        if (lv_obj_get_style_shadow_width(s_wake_timer_panel, LV_PART_MAIN) != glow_width) {
+            lv_obj_set_style_shadow_width(s_wake_timer_panel, glow_width, LV_PART_MAIN);
+        }
+        if (lv_obj_get_style_shadow_opa(s_wake_timer_panel, LV_PART_MAIN) != glow_opa) {
+            lv_obj_set_style_shadow_opa(s_wake_timer_panel, glow_opa, LV_PART_MAIN);
+        }
+        if (lv_obj_get_style_shadow_offset_y(s_wake_timer_panel, LV_PART_MAIN) != glow_y) {
+            lv_obj_set_style_shadow_offset_y(s_wake_timer_panel, glow_y, LV_PART_MAIN);
+        }
+    }
+    if (s_wake_timer_arc && !lv_color_eq(lv_obj_get_style_arc_color(s_wake_timer_arc, LV_PART_INDICATOR), glow_color)) {
+        lv_obj_set_style_arc_color(s_wake_timer_arc, glow_color, LV_PART_INDICATOR);
+    }
 }
 
 static void wake_timer_update_panel(void)
@@ -227,13 +277,17 @@ static void wake_timer_update_panel(void)
     else snprintf(detail, sizeof(detail), "%lu min left", (unsigned long)((remaining_s + 59u) / 60u));
     if (s_wake_timer_detail) lv_label_set_text(s_wake_timer_detail, detail);
 
-    if (s_wake_timer_arc && s_wake_lights_duration_ms) {
-        uint32_t value = (remaining_ms >= s_wake_lights_duration_ms)
+    uint32_t remaining_progress = 0u;
+    if (s_wake_lights_duration_ms) {
+        remaining_progress = (remaining_ms >= s_wake_lights_duration_ms)
             ? 1000u
             : (remaining_ms * 1000u + s_wake_lights_duration_ms / 2u) / s_wake_lights_duration_ms;
-        if (value > 1000u) value = 1000u;
-        lv_arc_set_value(s_wake_timer_arc, (int32_t)value);
+        if (remaining_progress > 1000u) remaining_progress = 1000u;
     }
+    if (s_wake_timer_arc) {
+        lv_arc_set_value(s_wake_timer_arc, (int32_t)remaining_progress);
+    }
+    wake_timer_apply_glow(remaining_progress);
     lv_obj_move_foreground(s_wake_timer_panel);
 }
 
@@ -289,6 +343,8 @@ static void idle_start_wake_lights_hold(const app_tuning_config_t *tuning)
     s_wake_lights_off_at_ms = s_wake_lights_timer_on ? s_wake_lights_started_at_ms + duration_ms : 0;
     s_wake_lights_duration_ms = s_wake_lights_timer_on ? duration_ms : 0;
     if (s_wake_lights_timer_on) {
+        s_wake_timer_x = -1;
+        s_wake_timer_y = -1;
         if (!s_wake_lights_timer) s_wake_lights_timer = lv_timer_create(wake_lights_timer_cb, 1000, NULL);
         else lv_timer_resume(s_wake_lights_timer);
         wake_timer_update_panel();
@@ -297,10 +353,11 @@ static void idle_start_wake_lights_hold(const app_tuning_config_t *tuning)
     }
 }
 
-static void idle_handle_dismissed(void)
+static void idle_handle_dismissed(bool wake_lights_allowed)
 {
     app_tuning_config_t tuning;
     if (app_config_tuning_load(&tuning) != ESP_OK) app_config_tuning_defaults(&tuning);
+    if (!wake_lights_allowed) return;
     if (!tuning.idle_dismiss_lights_on) return;
 
     idle_start_wake_lights_hold(&tuning);
@@ -313,12 +370,44 @@ static void idle_handle_dismissed(void)
     ESP_LOGI(TAG, "idle dismiss wake lights on%s", tuning.idle_dismiss_lights_timer_on ? " with timer" : "");
 }
 
+static bool idle_snooze_active(uint32_t now)
+{
+    return s_idle_snooze_until_ms && !idle_time_reached(now, s_idle_snooze_until_ms);
+}
+
+void idle_manager_dismiss_for_minutes(uint16_t minutes)
+{
+    if (minutes == 0) return;
+
+    app_tuning_config_t tuning;
+    if (app_config_tuning_load(&tuning) != ESP_OK) app_config_tuning_defaults(&tuning);
+
+    uint32_t duration_ms = (uint32_t)minutes * 60u * 1000u;
+    s_idle_snooze_until_ms = idle_now_ms() + duration_ms;
+
+    if (s_idle_active && s_main_scr) {
+        lv_screen_load(s_main_scr);
+        idle_handle_dismissed(tuning.idle_swipe_wake_lights_on);
+        s_idle_active = false;
+    }
+
+    ESP_LOGI(TAG, "idle screen snoozed for %u min", (unsigned)minutes);
+}
+
 static void idle_tick_cb(lv_timer_t *t)
 {
     (void)t;
     led_state_t ls; led_state_get(&ls);
     uint32_t timeout_ms = (uint32_t)ls.screen_timeout_s * 1000u;
     uint32_t inactive   = lv_display_get_inactive_time(NULL);
+    uint32_t now = idle_now_ms();
+
+    if (s_idle_snooze_until_ms && idle_time_reached(now, s_idle_snooze_until_ms)) {
+        s_idle_snooze_until_ms = 0;
+    }
+
+    if (s_idle_inhibited && !s_idle_active) return;
+    if (!s_idle_active && idle_snooze_active(now)) return;
     if (!s_idle_active && inactive >= timeout_ms) {
         s_main_scr = lv_screen_active();
         if (s_idle_scr == NULL) s_idle_scr = screen_idle_create();
@@ -329,10 +418,22 @@ static void idle_tick_cb(lv_timer_t *t)
         if (s_main_scr) {
             lv_screen_load(s_main_scr);
         }
-        idle_handle_dismissed();
+        idle_handle_dismissed(true);
         s_idle_active = false;
         ESP_LOGI(TAG, "idle dismissed");
     }
+}
+
+void idle_manager_set_inhibited(bool inhibited)
+{
+    if (s_idle_inhibited == inhibited) return;
+    s_idle_inhibited = inhibited;
+    if (inhibited && s_idle_active && s_main_scr) {
+        lv_screen_load(s_main_scr);
+        s_idle_active = false;
+        ESP_LOGI(TAG, "idle dismissed by inhibit");
+    }
+    ESP_LOGI(TAG, "idle %s", inhibited ? "inhibited" : "enabled");
 }
 
 esp_err_t idle_manager_start(void)

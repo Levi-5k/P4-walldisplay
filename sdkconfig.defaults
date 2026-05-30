@@ -53,17 +53,28 @@ CONFIG_ESP_HOSTED_CP_TARGET_ESP32C6=y
 CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE=y
 CONFIG_ESP_HOSTED_SDIO_SLOT_1=y
 CONFIG_ESP_HOSTED_SDIO_4_BIT_BUS=y
-CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ=40000
-CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
+CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ=10000
+CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE=10
+CONFIG_ESP_HOSTED_SDIO_RX_Q_SIZE=10
+# CONFIG_ESP_HOSTED_TRANSPORT_RESTART_ON_FAILURE is not set
+# CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM is not set
 CONFIG_ESP_HOSTED_DFLT_TASK_FROM_SPIRAM=y
 # CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE is not set
 
 # ---- lwIP TCP tuning (throttle for SDIO Wi-Fi stability) -------------------
-# Keep the receive window small to prevent TCP data bursts from overwhelming
-# the ESP-Hosted SDIO write queue with ACK packets.
-CONFIG_LWIP_TCP_WND_DEFAULT=2880
+# 1-MSS window forces alternating SDIO read/write (receive segment → send ACK)
+# so the write task never gets starved during sustained HTTPS downloads.
+# See espressif/esp-hosted-mcu #167, #184.
+CONFIG_LWIP_TCP_WND_DEFAULT=2440
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=2880
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=6
+
+# ---- mbedTLS ---------------------------------------------------------------
+# Default allocator lets TLS buffers fall back to PSRAM when internal RAM is
+# exhausted (the 16 KB inbound record buffer does not fit alongside WiFi
+# buffers in the limited internal heap).
+CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y
+# CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC is not set
 
 # ---- FreeRTOS --------------------------------------------------------------
 CONFIG_FREERTOS_HZ=1000

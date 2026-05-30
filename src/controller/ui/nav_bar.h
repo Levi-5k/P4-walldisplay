@@ -10,6 +10,7 @@ typedef void (*nav_page_shown_cb_t)(lv_obj_t *page, void *user_data);
 typedef struct {
     lv_obj_t *lights_page;
     lv_obj_t *weather_page;
+    lv_obj_t *timer_page;
     lv_obj_t *settings_page;
     nav_page_shown_cb_t page_shown_cb;
     void *page_shown_user_data;

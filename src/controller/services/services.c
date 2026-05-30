@@ -1,6 +1,7 @@
 #include "services.h"
 
 #include "app_config.h"
+#include "board_power.h"
 #include "board_pins.h"
 #include "led_state.h"
 #include "wled_state.h"
@@ -34,6 +35,7 @@
 #if CONFIG_SOC_WIFI_SUPPORTED || CONFIG_ESP_WIFI_REMOTE_ENABLED
 #define WALLDISPLAY_HAS_WIFI_DRIVER 1
 #include "esp_wifi.h"
+#include "esp_wifi_default.h"
 #include "esp_sntp.h"
 #if CONFIG_ESP_HOSTED_ENABLED
 #include "esp_hosted.h"
@@ -46,9 +48,17 @@ static const char *TAG = "services";
 
 #define CMD_QUEUE_LEN       16
 #define CMD_JSON_MAX        512
+#define CMD_TX_REPLY_GUARD_MS 200u
+#define CMD_TX_TASK_STACK_BYTES 4096
+#define RS485_RX_TASK_STACK_BYTES 8192
 #define GEOIP_TASK_STACK_BYTES 6144
 #define TIME_SYNC_TASK_STACK_BYTES 4096
 #define TIME_VALID_MIN_EPOCH 1704067200LL
+#define WLED_PROVISION_INITIAL_RETRY_MS 60000u
+#define WLED_PROVISION_MAX_RETRY_MS     300000u
+#define WLED_PROBE_ATTEMPTS 3u
+#define WLED_PROBE_WAIT_MS  1500u
+#define WLED_LOCAL_ECHO_HOLD_MS 2500u
 #define WIFI_CONNECTED_BIT  BIT0
 #define WIFI_FAIL_BIT       BIT1
 
@@ -61,11 +71,15 @@ static TaskHandle_t      s_cmd_task;
 static TaskHandle_t      s_rx_task;
 static TaskHandle_t      s_link_task;
 static TaskHandle_t      s_provision_task;
+static volatile bool     s_provision_force_requested;
 static TaskHandle_t      s_geoip_task;
 static TaskHandle_t      s_time_sync_task;
 static SemaphoreHandle_t s_status_mtx;
 static SemaphoreHandle_t s_https_mtx;    /* exclusive HTTPS-over-SDIO lock */
 static EventGroupHandle_t s_wifi_events;
+static portMUX_TYPE s_bulk_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_bulk_network_users;
+static volatile uint32_t s_wled_local_echo_hold_until_ms;
 
 static services_status_t s_status = {
     .wifi_supported = WALLDISPLAY_HAS_WIFI_DRIVER,
@@ -100,6 +114,26 @@ static void copy_text(char *dst, size_t dst_len, const char *src)
 {
     if (!dst || dst_len == 0) return;
     snprintf(dst, dst_len, "%s", src ? src : "");
+}
+
+static uint32_t services_now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+
+static bool time_before_deadline(uint32_t now_ms, uint32_t deadline_ms)
+{
+    return deadline_ms && (int32_t)(deadline_ms - now_ms) > 0;
+}
+
+static void note_wled_local_echo_hold(void)
+{
+    s_wled_local_echo_hold_until_ms = services_now_ms() + WLED_LOCAL_ECHO_HOLD_MS;
+}
+
+static bool wled_local_echo_hold_active(void)
+{
+    return time_before_deadline(services_now_ms(), s_wled_local_echo_hold_until_ms);
 }
 
 static void status_lock(void)
@@ -215,9 +249,31 @@ static void status_note_rs485(bool ready)
     status_unlock();
 }
 
+static void status_note_rs485_tx(void)
+{
+    status_lock();
+    s_status.rs485_tx_lines++;
+    status_unlock();
+}
+
+static void status_note_rs485_drop(void)
+{
+    status_lock();
+    s_status.rs485_dropped_tx++;
+    status_unlock();
+}
+
+static void status_note_rs485_overflow(void)
+{
+    status_lock();
+    s_status.rs485_rx_overflows++;
+    status_unlock();
+}
+
 static void status_note_wled_rx(void)
 {
     status_lock();
+    s_status.rs485_rx_lines++;
     s_status.wled_online = true;
     s_status.wled_last_rx_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
     status_unlock();
@@ -377,6 +433,8 @@ static void geoip_format_area(char *area, size_t area_len,
 
 static esp_err_t geoip_http_get(const char *url, const char *provider, http_body_t *body)
 {
+    if (services_network_bulk_active()) return ESP_ERR_INVALID_STATE;
+
     esp_http_client_config_t cfg = {
         .url = url,
         .timeout_ms = 8000,
@@ -945,14 +1003,27 @@ esp_err_t services_reset_wifi_link(void)
     return ESP_ERR_NOT_SUPPORTED;
 #else
     ESP_LOGW(TAG, "Resetting SDIO/WiFi link (C6 coprocessor will reboot)");
+    s_wifi_auto_connect_enabled = false;
+    if (s_wifi_events) xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    status_note_wifi_connected(false, NULL, "Resetting Wi-Fi");
+    status_note_wifi_detail("Resetting Wi-Fi", 0);
 
     /* ── Kill the C6 immediately via GPIO reset ──
-     * Pull the reset pin LOW *before* any SDIO teardown.  This stops
-     * the SDIO slave instantly so the degraded host driver cannot send
-     * traffic that triggers "Unrecoverable host sdio state".         */
-    s_wifi_auto_connect_enabled = false;
+     * Pull the reset pin LOW before Wi-Fi/netif teardown.  If the hosted
+     * transport is already degraded, even cleanup traffic can trip the SDIO
+     * driver's unrecoverable state path.                                */
     gpio_set_level(BSP_C6_RST, 0);        /* hold C6 in reset (active-high EN) */
     ESP_LOGI(TAG, "C6 reset pin pulled LOW, waiting for SDIO bus idle");
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    wifi_event_sta_disconnected_t disconnect_event = {0};
+    disconnect_event.reason = WIFI_REASON_CONNECTION_FAIL;
+    (void)esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED,
+                         &disconnect_event, sizeof(disconnect_event),
+                         pdMS_TO_TICKS(250));
+    vTaskDelay(pdMS_TO_TICKS(100));
+    (void)esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_STOP, NULL, 0,
+                         pdMS_TO_TICKS(250));
     vTaskDelay(pdMS_TO_TICKS(100));
 
     /* ── Tear down host-side drivers (slave is dead, no SDIO traffic) ── */
@@ -961,9 +1032,14 @@ esp_err_t services_reset_wifi_link(void)
     vTaskDelay(pdMS_TO_TICKS(100));
 
     /* WiFi deinit after transport is down — no SDIO commands possible */
+    if (s_wifi_started) (void)esp_wifi_stop();
     (void)esp_wifi_deinit();
     s_wifi_started = false;
     s_wifi_initialized = false;
+    if (s_sta_netif) {
+        esp_netif_destroy_default_wifi(s_sta_netif);
+        s_sta_netif = NULL;
+    }
     vTaskDelay(pdMS_TO_TICKS(200));
 
     /* ── Rebuild ── wifi_driver_prepare re-inits hosted (which resets the
@@ -1015,6 +1091,28 @@ void services_https_lock(void)
 void services_https_unlock(void)
 {
     if (s_https_mtx) xSemaphoreGive(s_https_mtx);
+}
+
+void services_network_bulk_begin(void)
+{
+    portENTER_CRITICAL(&s_bulk_lock);
+    s_bulk_network_users++;
+    portEXIT_CRITICAL(&s_bulk_lock);
+}
+
+void services_network_bulk_end(void)
+{
+    portENTER_CRITICAL(&s_bulk_lock);
+    if (s_bulk_network_users > 0) s_bulk_network_users--;
+    portEXIT_CRITICAL(&s_bulk_lock);
+}
+
+bool services_network_bulk_active(void)
+{
+    portENTER_CRITICAL(&s_bulk_lock);
+    bool active = s_bulk_network_users > 0;
+    portEXIT_CRITICAL(&s_bulk_lock);
+    return active;
 }
 
 esp_err_t wifi_scan_networks(wifi_scan_result_t *results, size_t max_results, size_t *result_count)
@@ -1149,6 +1247,7 @@ esp_err_t cmd_tx_send_json(const char *json)
     if (xQueueSend(s_cmd_q, &msg, 0) != pdTRUE) {
         cmd_msg_t dropped;
         (void)xQueueReceive(s_cmd_q, &dropped, 0);
+        status_note_rs485_drop();
         if (xQueueSend(s_cmd_q, &msg, 0) != pdTRUE) return ESP_ERR_TIMEOUT;
     }
     return ESP_OK;
@@ -1158,6 +1257,24 @@ static uint8_t pct_to_wled_bri(uint8_t pct)
 {
     if (pct > 100) pct = 100;
     return (uint8_t)(((uint32_t)pct * 255u + 50u) / 100u);
+}
+
+static void hue_to_rgb(uint8_t hue, uint8_t *r, uint8_t *g, uint8_t *b)
+{
+    uint16_t region = hue / 43;
+    uint16_t rem = (hue - (region * 43)) * 6;
+    uint8_t q = (uint8_t)(255 - rem);
+    uint8_t t = (uint8_t)rem;
+
+    switch (region) {
+    default:
+    case 0: *r = 255; *g = t;   *b = 0;   break;
+    case 1: *r = q;   *g = 255; *b = 0;   break;
+    case 2: *r = 0;   *g = 255; *b = t;   break;
+    case 3: *r = 0;   *g = q;   *b = 255; break;
+    case 4: *r = t;   *g = 0;   *b = 255; break;
+    case 5: *r = 255; *g = 0;   *b = q;   break;
+    }
 }
 
 static uint8_t kelvin_to_wled_cct(const led_state_t *state)
@@ -1172,7 +1289,7 @@ static uint8_t kelvin_to_wled_cct(const led_state_t *state)
     return (uint8_t)((((uint32_t)k - min_k) * 255u + span / 2u) / span);
 }
 
-static bool led_fields_match(const led_state_t *a, const led_state_t *b)
+static bool led_light_fields_match(const led_state_t *a, const led_state_t *b)
 {
     return a->power == b->power &&
            a->brightness_pct == b->brightness_pct &&
@@ -1181,23 +1298,56 @@ static bool led_fields_match(const led_state_t *a, const led_state_t *b)
            a->kelvin_max == b->kelvin_max;
 }
 
+static bool led_hue_fields_match(const led_state_t *a, const led_state_t *b)
+{
+    return a->primary_hue == b->primary_hue &&
+           a->secondary_hue == b->secondary_hue;
+}
+
+static esp_err_t publish_light_fields_to_wled(const led_state_t *state)
+{
+    char json[128];
+    snprintf(json, sizeof(json),
+             "{\"on\":%s,\"bri\":%u,\"transition\":7,\"seg\":[{\"id\":0,\"cct\":%u}]}",
+             state->power ? "true" : "false",
+             pct_to_wled_bri(state->brightness_pct),
+             kelvin_to_wled_cct(state));
+    return cmd_tx_send_json(json);
+}
+
+static esp_err_t publish_hue_fields_to_wled(const led_state_t *state)
+{
+    uint8_t primary[3] = {0};
+    uint8_t secondary[3] = {0};
+    hue_to_rgb(state->primary_hue, &primary[0], &primary[1], &primary[2]);
+    hue_to_rgb(state->secondary_hue, &secondary[0], &secondary[1], &secondary[2]);
+
+    char json[112];
+    snprintf(json, sizeof(json),
+             "{\"seg\":[{\"id\":0,\"col\":[[%u,%u,%u],[%u,%u,%u]]}]}",
+             primary[0], primary[1], primary[2],
+             secondary[0], secondary[1], secondary[2]);
+    return cmd_tx_send_json(json);
+}
+
 static void publish_led_state_to_wled(const led_state_t *state, void *user)
 {
     (void)user;
     static bool have_last;
     static led_state_t last;
 
-    if (!state || (have_last && led_fields_match(state, &last))) return;
+    if (!state) return;
 
-    char json[160];
-    snprintf(json, sizeof(json),
-             "{\"on\":%s,\"bri\":%u,\"transition\":7,\"seg\":[{\"id\":0,\"cct\":%u}]}",
-             state->power ? "true" : "false",
-             pct_to_wled_bri(state->brightness_pct),
-             kelvin_to_wled_cct(state));
-    if (cmd_tx_send_json(json) == ESP_OK) {
+    bool light_changed = !have_last || !led_light_fields_match(state, &last);
+    bool hue_changed = !have_last || !led_hue_fields_match(state, &last);
+    if (!light_changed && !hue_changed) return;
+
+    esp_err_t light_err = light_changed ? publish_light_fields_to_wled(state) : ESP_OK;
+    esp_err_t hue_err = hue_changed ? publish_hue_fields_to_wled(state) : ESP_OK;
+    if (light_err == ESP_OK && hue_err == ESP_OK) {
         last = *state;
         have_last = true;
+        note_wled_local_echo_hold();
     }
 }
 
@@ -1208,9 +1358,11 @@ static void cmd_worker(void *arg)
     while (xQueueReceive(s_cmd_q, &msg, portMAX_DELAY) == pdTRUE) {
         size_t len = strlen(msg.text);
         if (len == 0) continue;
-        uart_write_bytes(BSP_RS485_UART_NUM, msg.text, len);
+        int written = uart_write_bytes(BSP_RS485_UART_NUM, msg.text, len);
         uart_write_bytes(BSP_RS485_UART_NUM, "\n", 1);
         uart_wait_tx_done(BSP_RS485_UART_NUM, pdMS_TO_TICKS(250));
+        if (written == (int)len) status_note_rs485_tx();
+        vTaskDelay(pdMS_TO_TICKS(CMD_TX_REPLY_GUARD_MS));
     }
 }
 
@@ -1245,6 +1397,7 @@ static void rs485_rx_worker(void *arg)
                 line[pos++] = ch;
             } else {
                 pos = 0;
+                status_note_rs485_overflow();
             }
         }
     }
@@ -1253,6 +1406,8 @@ static void rs485_rx_worker(void *arg)
 esp_err_t cmd_tx_init(void)
 {
     if (s_cmd_q) return ESP_OK;
+
+    ESP_RETURN_ON_ERROR(board_power_enable_vo4_3v3(), TAG, "RS-485 VO4 power enable failed");
 
     uart_config_t cfg = {
         .baud_rate = BSP_RS485_BAUD,
@@ -1273,10 +1428,10 @@ esp_err_t cmd_tx_init(void)
     s_cmd_q = xQueueCreate(CMD_QUEUE_LEN, sizeof(cmd_msg_t));
     if (!s_cmd_q) return ESP_ERR_NO_MEM;
 
-    if (xTaskCreate(cmd_worker, "cmd_tx", 4096, NULL, 6, &s_cmd_task) != pdPASS) {
+    if (xTaskCreate(cmd_worker, "cmd_tx", CMD_TX_TASK_STACK_BYTES, NULL, 6, &s_cmd_task) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
-    if (xTaskCreate(rs485_rx_worker, "rs485_rx", 4096, NULL, 5, &s_rx_task) != pdPASS) {
+    if (xTaskCreate(rs485_rx_worker, "rs485_rx", RS485_RX_TASK_STACK_BYTES, NULL, 5, &s_rx_task) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
     status_note_rs485(true);
@@ -1310,16 +1465,45 @@ static void json_escape(const char *src, char *dst, size_t dst_len)
     dst[out] = '\0';
 }
 
-static bool wled_recently_seen(void)
+static bool wled_status_seen_within(uint32_t max_age_ms)
 {
-    app_tuning_config_t tuning;
-    if (app_config_tuning_load(&tuning) != ESP_OK) app_config_tuning_defaults(&tuning);
-
     services_status_t st;
     services_status_get(&st);
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
     return st.wled_online && st.wled_last_rx_ms &&
-           (now_ms - st.wled_last_rx_ms) < (uint32_t)tuning.wled_stale_s * 1000u;
+           (now_ms - st.wled_last_rx_ms) < max_age_ms;
+}
+
+static bool wled_recently_seen(void)
+{
+    app_tuning_config_t tuning;
+    if (app_config_tuning_load(&tuning) != ESP_OK) app_config_tuning_defaults(&tuning);
+    return wled_status_seen_within((uint32_t)tuning.wled_stale_s * 1000u);
+}
+
+static bool wled_wait_recently_seen(uint32_t timeout_ms)
+{
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    while (xTaskGetTickCount() < deadline) {
+        if (wled_status_seen_within(30000u)) return true;
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+    return false;
+}
+
+static bool wled_probe_existing_link(void)
+{
+    for (uint8_t attempt = 0; attempt < WLED_PROBE_ATTEMPTS; attempt++) {
+        if (wled_recently_seen()) return true;
+        if (cmd_tx_is_ready()) (void)cmd_tx_send_json("{\"v\":true}");
+        if (wled_wait_recently_seen(WLED_PROBE_WAIT_MS)) return true;
+    }
+    return wled_recently_seen();
+}
+
+static bool provision_wait(uint32_t wait_ms)
+{
+    return ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait_ms)) > 0;
 }
 
 static void provision_worker(void *arg)
@@ -1331,11 +1515,40 @@ static void provision_worker(void *arg)
     char ssid_json[70];
     char psk_json[140];
     char json[360];
+    uint32_t retry_ms = WLED_PROVISION_INITIAL_RETRY_MS;
+    bool force = false;
 
     while (1) {
-        if (!cmd_tx_is_ready()) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
+        if (s_provision_force_requested) {
+            s_provision_force_requested = false;
+            force = true;
+            retry_ms = WLED_PROVISION_INITIAL_RETRY_MS;
+        }
+
+        if (services_network_bulk_active()) {
+            if (provision_wait(1000)) force = true;
             continue;
+        }
+
+        if (!cmd_tx_is_ready()) {
+            if (provision_wait(1000)) force = true;
+            continue;
+        }
+
+        if (!force && wled_recently_seen()) {
+            if (s_provision_force_requested) continue;
+            ESP_LOGI(TAG, "WLED already online; provisioning worker idle");
+            s_provision_task = NULL;
+            vTaskDelete(NULL);
+            return;
+        }
+
+        if (!force && wled_probe_existing_link()) {
+            if (s_provision_force_requested) continue;
+            ESP_LOGI(TAG, "WLED responded to startup probe; provisioning worker idle");
+            s_provision_task = NULL;
+            vTaskDelete(NULL);
+            return;
         }
 
         if (!read_wifi_creds(ssid, sizeof(ssid), psk, sizeof(psk))) {
@@ -1353,28 +1566,50 @@ static void provision_worker(void *arg)
                  "\"if\":{\"sync\":{\"recv\":true,\"port\":11988,\"group\":1}}}",
                  ssid_json, psk_json);
 
-        ESP_LOGI(TAG, "Sending WLED provisioning config for SSID '%s'", ssid);
+            ESP_LOGI(TAG, "%s WLED provisioning config for SSID '%s'",
+                 force ? "Force-sending" : "Sending", ssid);
         (void)cmd_tx_send_json(json);
         (void)cmd_tx_send_json("{\"v\":true}");
 
-        vTaskDelay(pdMS_TO_TICKS(8000));
-        if (wled_recently_seen()) {
+        if (wled_wait_recently_seen(8000)) {
             ESP_LOGI(TAG, "WLED responded after provisioning");
             s_provision_task = NULL;
             vTaskDelete(NULL);
             return;
         }
 
-        ESP_LOGW(TAG, "No WLED response after provisioning; will retry");
-        vTaskDelay(pdMS_TO_TICKS(60000));
+        ESP_LOGW(TAG, "No WLED response after provisioning; retry in %us", (unsigned)(retry_ms / 1000u));
+        if (provision_wait(retry_ms)) {
+            force = true;
+            retry_ms = WLED_PROVISION_INITIAL_RETRY_MS;
+            continue;
+        }
+        if (retry_ms < WLED_PROVISION_MAX_RETRY_MS) {
+            retry_ms *= 2u;
+            if (retry_ms > WLED_PROVISION_MAX_RETRY_MS) retry_ms = WLED_PROVISION_MAX_RETRY_MS;
+        }
     }
+}
+
+static esp_err_t provision_start(bool force)
+{
+    if (force) s_provision_force_requested = true;
+    if (s_provision_task) {
+        if (force) xTaskNotifyGive(s_provision_task);
+        return ESP_OK;
+    }
+    return xTaskCreate(provision_worker, "wled_provision", 6144, NULL, 4,
+                       &s_provision_task) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
 esp_err_t provision_init(void)
 {
-    if (s_provision_task) return ESP_OK;
-    return xTaskCreate(provision_worker, "wled_provision", 6144, NULL, 4,
-                       &s_provision_task) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    return provision_start(false);
+}
+
+esp_err_t provision_wifi_update(void)
+{
+    return provision_start(true);
 }
 
 static void link_health_worker(void *arg)
@@ -1383,6 +1618,11 @@ static void link_health_worker(void *arg)
     while (1) {
         app_tuning_config_t tuning;
         if (app_config_tuning_load(&tuning) != ESP_OK) app_config_tuning_defaults(&tuning);
+
+        if (services_network_bulk_active()) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
 
         if (cmd_tx_is_ready()) (void)cmd_tx_send_json("{\"v\":true}");
 
@@ -1393,7 +1633,9 @@ static void link_health_worker(void *arg)
             now_ms - st.wled_last_rx_ms > (uint32_t)tuning.wled_stale_s * 1000u) {
             status_note_wled_online(false);
         }
-        vTaskDelay(pdMS_TO_TICKS((uint32_t)tuning.wled_poll_s * 1000u));
+        uint32_t poll_ms = (uint32_t)tuning.wled_poll_s * 1000u;
+        if (poll_ms < 1000u) poll_ms = 1000u;
+        vTaskDelay(pdMS_TO_TICKS(poll_ms));
     }
 }
 
@@ -1407,6 +1649,12 @@ static void wled_state_reconcile(const wled_state_t *ws, void *user)
 
     bool power = ws->on;
     uint8_t bri_pct = (uint8_t)(((uint32_t)ws->bri * 100u + 127u) / 255u);
+
+    if (wled_local_echo_hold_active() &&
+        (current.power != power || current.brightness_pct != bri_pct)) {
+        ESP_LOGD(TAG, "ignoring stale WLED echo during local control window");
+        return;
+    }
 
     if (current.power != power) {
         if (!power && led_state_power_on_hold_active()) {

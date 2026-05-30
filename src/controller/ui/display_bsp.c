@@ -15,6 +15,7 @@ static const char *TAG = "display_bsp";
 
 #define DEFAULT_BRIGHTNESS_PERCENT  60
 #define FAST_DRAW_BUFFER_PIXELS     (BSP_LCD_H_RES * 80)
+#define LVGL_TASK_STACK_BYTES       12288
 
 esp_err_t display_bsp_init(void)
 {
@@ -24,12 +25,13 @@ esp_err_t display_bsp_init(void)
         .double_buffer = BSP_LCD_DRAW_BUFF_DOUBLE,
         .flags = {
             .buff_dma    = true,
-            .buff_spiram = false,
+            .buff_spiram = true,
             .sw_rotate   = false,
         },
     };
 
     cfg.lvgl_port_cfg.task_max_sleep_ms = 20;
+    cfg.lvgl_port_cfg.task_stack = LVGL_TASK_STACK_BYTES;
 
     if (bsp_display_start_with_config(&cfg) == NULL) {
         ESP_LOGE(TAG, "bsp_display_start_with_config failed");

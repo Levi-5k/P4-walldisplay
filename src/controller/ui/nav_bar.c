@@ -1,7 +1,7 @@
 #include "nav_bar.h"
 #include "theme.h"
 
-#define NAV_BUTTON_COUNT 3
+#define NAV_BUTTON_COUNT 4
 
 static lv_obj_t *s_pages[NAV_BUTTON_COUNT];
 static int       s_page_count;
@@ -90,6 +90,7 @@ lv_obj_t *nav_bar_create(lv_obj_t *parent, const nav_pages_t *pages)
     s_page_count = 0;
     if (pages->lights_page)   s_pages[s_page_count++] = pages->lights_page;
     if (pages->weather_page)  s_pages[s_page_count++] = pages->weather_page;
+    if (pages->timer_page)    s_pages[s_page_count++] = pages->timer_page;
     if (pages->settings_page) s_pages[s_page_count++] = pages->settings_page;
 
     lv_obj_t *bar = lv_obj_create(parent);
@@ -105,7 +106,8 @@ lv_obj_t *nav_bar_create(lv_obj_t *parent, const nav_pages_t *pages)
 
     s_buttons[0] = icon_btn(bar, LV_SYMBOL_EYE_OPEN, "Lights",   pages->lights_page);
     s_buttons[1] = icon_btn(bar, LV_SYMBOL_REFRESH,  "Weather",  pages->weather_page);
-    s_buttons[2] = icon_btn(bar, LV_SYMBOL_SETTINGS, "Settings", pages->settings_page);
+    s_buttons[2] = icon_btn(bar, LV_SYMBOL_PLAY,     "Timer",    pages->timer_page);
+    s_buttons[3] = icon_btn(bar, LV_SYMBOL_SETTINGS, "Settings", pages->settings_page);
 
     if (pages->lights_page) {
         show_only(pages->lights_page);

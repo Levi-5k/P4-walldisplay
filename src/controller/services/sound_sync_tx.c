@@ -19,30 +19,34 @@ static struct sockaddr_in s_dest;
 static bool s_ready;
 static bool s_dest_resolved;
 static uint64_t s_last_send_us;
+static uint8_t s_frame_counter;
 
-/* WLED-MM audioSyncPacket layout (v0.14):
+/* WLED-MM audioSyncPacket layout (v2):
  * Offset  Size  Field
- *   0       6   header (magic: 00 00 00 00 00 02)
- *   6       4   sampleRaw (float)
- *  10       4   sampleSmooth (float)
- *  14       1   samplePeak (uint8)
- *  15      16   fftResult[16] (uint8 × 16)
- *  31       4   FFT_Magnitude (float)
- *  35       4   FFT_MajorPeak (float)
- *  39       1   reserved/padding
- *  Total: 40 bytes (not 44 — corrected from plan estimate)
+ *   0       6   header (ASCII "00002" plus NUL)
+ *   6       2   pressure fixed point (optional)
+ *   8       4   sampleRaw (float)
+ *  12       4   sampleSmooth (float)
+ *  16       1   samplePeak (uint8)
+ *  17       1   frameCounter (uint8)
+ *  18      16   fftResult[16] (uint8)
+ *  34       2   zeroCrossingCount (uint16)
+ *  36       4   FFT_Magnitude (float)
+ *  40       4   FFT_MajorPeak (float)
  */
-#define PACKET_SIZE_ACTUAL 40
+#define PACKET_SIZE_ACTUAL 44
 
 typedef struct __attribute__((packed)) {
-    uint8_t  header[6];
+    char     header[6];
+    uint8_t  pressure[2];
     float    sample_raw;
     float    sample_smooth;
     uint8_t  sample_peak;
+    uint8_t  frame_counter;
     uint8_t  fft_result[16];
+    uint16_t zero_crossing_count;
     float    fft_magnitude;
     float    fft_major_peak;
-    uint8_t  reserved;
 } wled_audio_sync_packet_t;
 
 _Static_assert(sizeof(wled_audio_sync_packet_t) == PACKET_SIZE_ACTUAL,
@@ -89,6 +93,7 @@ static void on_fft_result(const audio_fft_result_t *result, void *user)
 {
     (void)user;
     if (!s_ready || s_sock < 0) return;
+    if (services_network_bulk_active()) return;
 
     uint64_t now_us = esp_timer_get_time();
     if (now_us - s_last_send_us < MIN_SEND_INTERVAL_US) return;
@@ -96,11 +101,11 @@ static void on_fft_result(const audio_fft_result_t *result, void *user)
     if (!s_dest_resolved && !resolve_destination()) return;
 
     wled_audio_sync_packet_t pkt = {0};
-    pkt.header[4] = 0x00;
-    pkt.header[5] = 0x02;
+    memcpy(pkt.header, "00002", sizeof(pkt.header));
     pkt.sample_raw = result->sample_raw;
     pkt.sample_smooth = result->sample_smooth;
     pkt.sample_peak = result->sample_peak ? 1 : 0;
+    pkt.frame_counter = ++s_frame_counter;
     memcpy(pkt.fft_result, result->bin, FFT_BINS);
     pkt.fft_magnitude = result->fft_magnitude;
     pkt.fft_major_peak = result->fft_major_peak;
@@ -115,12 +120,6 @@ static void on_fft_result(const audio_fft_result_t *result, void *user)
 esp_err_t sound_sync_tx_start(void)
 {
     if (s_ready) return ESP_OK;
-
-    services_status_t status;
-    if (services_status_get(&status) != ESP_OK || !status.wifi_connected) {
-        ESP_LOGW(TAG, "Sound Sync TX deferred: Wi-Fi not connected");
-        return ESP_ERR_INVALID_STATE;
-    }
 
     if (!audio_fft_is_ready()) {
         ESP_LOGW(TAG, "Sound Sync TX deferred: audio FFT not ready");

@@ -10,13 +10,16 @@
 idf_component_register(
     SRCS
         "controller/main.c"
+        "controller/board_power.c"
         "controller/ui/display_bsp.c"
         "controller/ui/ui_init.c"
         "controller/ui/theme.c"
         "controller/ui/wled_effect_catalog.c"
         "controller/ui/ui_background.c"
         "controller/ui/jpeg_conv.c"
+        "controller/ui/jpeg_hw.c"
         "controller/ui/screens.c"
+        "controller/ui/screen_timer.c"
         "controller/ui/idle_manager.c"
         "controller/ui/backlight_pwm.c"
         "controller/ui/backlight_manager.c"
@@ -26,9 +29,13 @@ idf_component_register(
         "controller/services/services.c"
         "controller/services/app_config.c"
         "controller/services/sd_storage.c"
+        "controller/services/serial_debug.c"
         "controller/services/led_state.c"
+        "controller/services/audio_bus.c"
         "controller/services/audio_in.c"
         "controller/services/audio_fft.c"
+        "controller/services/audio_out.c"
+        "controller/services/audio_library.c"
         "controller/services/sound_sync_tx.c"
         "controller/services/wled_state.c"
         "controller/services/slave_ota.c"
@@ -53,6 +60,7 @@ idf_component_register(
         esp_lcd
         esp_partition
         esp_psram
+        esp_driver_jpeg
         nvs_flash
         driver
         esp_event
@@ -62,6 +70,7 @@ idf_component_register(
         fatfs
         espressif__esp_hosted
         espressif__esp_wifi_remote
+        espressif__esp_codec_dev
         espressif__esp-dsp
         json
         sdmmc

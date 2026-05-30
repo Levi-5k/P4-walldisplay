@@ -19,6 +19,8 @@ typedef struct {
     bool     power;                  /* current on/off */
     uint8_t  brightness_pct;         /* 0..100 */
     uint16_t kelvin;                 /* current color temp */
+    uint8_t  primary_hue;            /* WLED color slot 0 hue */
+    uint8_t  secondary_hue;          /* WLED color slot 1 hue */
 
     /* Settings (persisted to NVS) */
     uint16_t kelvin_min;             /* warm end */
@@ -35,6 +37,8 @@ void      led_state_get(led_state_t *out);
 void led_state_set_power(bool on);
 void led_state_set_brightness(uint8_t pct);
 void led_state_set_kelvin(uint16_t k);
+void led_state_set_hues(uint8_t primary_hue, uint8_t secondary_hue);
+void led_state_persist_current(void);
 
 void led_state_hold_power_on_for(uint32_t duration_ms);
 void led_state_clear_power_on_hold(void);

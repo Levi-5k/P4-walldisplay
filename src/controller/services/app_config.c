@@ -257,6 +257,7 @@ void app_config_tuning_defaults(app_tuning_config_t *out)
     out->weather_page_update_s = 1;
     out->wled_poll_s = 5;
     out->wled_stale_s = 30;
+    out->wled_hue_update_hz = 5;
     out->auto_brightness_enabled = false;
     out->auto_brightness_min_pct = 5;
     out->auto_brightness_max_pct = 100;
@@ -268,8 +269,26 @@ void app_config_tuning_defaults(app_tuning_config_t *out)
     out->idle_dismiss_lights_on = false;
     out->idle_dismiss_lights_timer_on = false;
     out->idle_dismiss_lights_timer_min = 30;
+    out->idle_swipe_dismiss_min = 30;
+    out->idle_swipe_wake_lights_on = true;
     out->status_bar_update_s = 1;
     out->toast_duration_ms = 1600;
+    out->timer_audio_volume_pct = 70;
+    out->timer_repeat_until_dismissed = true;
+    out->timer_repeat_gap_s = 2;
+    out->timer_snooze_min = 5;
+    out->timer_snooze_limit = 3;
+    out->timer_default_seconds = 60;
+    out->timer_quick_seconds[0] = 30;
+    out->timer_quick_seconds[1] = 60;
+    out->timer_quick_seconds[2] = 300;
+    out->timer_quick_seconds[3] = 600;
+    for (size_t i = 0; i < APP_TIMER_HISTORY_COUNT; i++) {
+        out->timer_history_seconds[i] = 0;
+    }
+    out->timer_prealert_s = 10;
+    out->timer_finish_light_action = 0;
+    out->timer_audio_path[0] = '\0';
 }
 
 static void app_config_tuning_clamp(app_tuning_config_t *cfg)
@@ -286,6 +305,7 @@ static void app_config_tuning_clamp(app_tuning_config_t *cfg)
     cfg->wled_poll_s = clamp_u8(cfg->wled_poll_s, 2, 30);
     cfg->wled_stale_s = clamp_u8(cfg->wled_stale_s, 10, 120);
     if (cfg->wled_stale_s < cfg->wled_poll_s * 2) cfg->wled_stale_s = cfg->wled_poll_s * 2;
+    cfg->wled_hue_update_hz = clamp_u8(cfg->wled_hue_update_hz, 1, 5);
     cfg->auto_brightness_enabled = cfg->auto_brightness_enabled ? true : false;
     cfg->auto_brightness_min_pct = clamp_u8(cfg->auto_brightness_min_pct, 1, 60);
     cfg->auto_brightness_max_pct = clamp_u8(cfg->auto_brightness_max_pct, 20, 100);
@@ -300,8 +320,31 @@ static void app_config_tuning_clamp(app_tuning_config_t *cfg)
     cfg->idle_dismiss_lights_on = cfg->idle_dismiss_lights_on ? true : false;
     cfg->idle_dismiss_lights_timer_on = cfg->idle_dismiss_lights_timer_on ? true : false;
     cfg->idle_dismiss_lights_timer_min = clamp_u16(cfg->idle_dismiss_lights_timer_min, 1, 240);
+    cfg->idle_swipe_dismiss_min = clamp_u16(cfg->idle_swipe_dismiss_min, 1, 240);
+    cfg->idle_swipe_wake_lights_on = cfg->idle_swipe_wake_lights_on ? true : false;
     cfg->status_bar_update_s = clamp_u8(cfg->status_bar_update_s, 1, 10);
     cfg->toast_duration_ms = clamp_u16(cfg->toast_duration_ms, 800, 5000);
+    cfg->timer_audio_volume_pct = clamp_u8(cfg->timer_audio_volume_pct, 0, 100);
+    cfg->timer_repeat_until_dismissed = cfg->timer_repeat_until_dismissed ? true : false;
+    cfg->timer_repeat_gap_s = clamp_u8(cfg->timer_repeat_gap_s, 0, 30);
+    cfg->timer_snooze_min = clamp_u8(cfg->timer_snooze_min, 1, 30);
+    cfg->timer_snooze_limit = clamp_u8(cfg->timer_snooze_limit, 0, 10);
+    cfg->timer_default_seconds = clamp_u16(cfg->timer_default_seconds, 30, 7200);
+    for (size_t i = 0; i < APP_TIMER_QUICK_PRESET_COUNT; i++) {
+        cfg->timer_quick_seconds[i] = clamp_u16(cfg->timer_quick_seconds[i], 10, 7200);
+    }
+    for (size_t i = 0; i < APP_TIMER_HISTORY_COUNT; i++) {
+        if (cfg->timer_history_seconds[i] > 0) {
+            cfg->timer_history_seconds[i] = clamp_u16(cfg->timer_history_seconds[i], 1, 7200);
+        }
+    }
+    cfg->timer_prealert_s = clamp_u16(cfg->timer_prealert_s, 0, 300);
+    cfg->timer_finish_light_action = clamp_u8(cfg->timer_finish_light_action, 0, 3);
+    cfg->timer_audio_path[sizeof(cfg->timer_audio_path) - 1] = '\0';
+    if (has_line_break(cfg->timer_audio_path) ||
+        (cfg->timer_audio_path[0] && strncmp(cfg->timer_audio_path, "/sdcard/", 8) != 0)) {
+        cfg->timer_audio_path[0] = '\0';
+    }
 }
 
 esp_err_t app_config_tuning_load(app_tuning_config_t *out)
@@ -326,6 +369,7 @@ esp_err_t app_config_tuning_load(app_tuning_config_t *out)
     if (nvs_get_u8(h, "wx_ui", &u8) == ESP_OK) out->weather_page_update_s = u8;
     if (nvs_get_u8(h, "wl_poll", &u8) == ESP_OK) out->wled_poll_s = u8;
     if (nvs_get_u8(h, "wl_stale", &u8) == ESP_OK) out->wled_stale_s = u8;
+    if (nvs_get_u8(h, "wl_hue_hz", &u8) == ESP_OK) out->wled_hue_update_hz = u8;
     if (nvs_get_u8(h, "bl_auto", &u8) == ESP_OK) out->auto_brightness_enabled = u8 != 0;
     if (nvs_get_u8(h, "bl_min", &u8) == ESP_OK) out->auto_brightness_min_pct = u8;
     if (nvs_get_u8(h, "bl_max", &u8) == ESP_OK) out->auto_brightness_max_pct = u8;
@@ -337,8 +381,28 @@ esp_err_t app_config_tuning_load(app_tuning_config_t *out)
     if (nvs_get_u8(h, "idle_wlon", &u8) == ESP_OK) out->idle_dismiss_lights_on = u8 != 0;
     if (nvs_get_u8(h, "idle_wlt_on", &u8) == ESP_OK) out->idle_dismiss_lights_timer_on = u8 != 0;
     if (nvs_get_u16(h, "idle_wlt_min", &u16) == ESP_OK) out->idle_dismiss_lights_timer_min = u16;
+    if (nvs_get_u16(h, "idle_swp_min", &u16) == ESP_OK) out->idle_swipe_dismiss_min = u16;
+    if (nvs_get_u8(h, "idle_swp_wl", &u8) == ESP_OK) out->idle_swipe_wake_lights_on = u8 != 0;
     if (nvs_get_u8(h, "stat_upd", &u8) == ESP_OK) out->status_bar_update_s = u8;
     if (nvs_get_u16(h, "toast_ms", &u16) == ESP_OK) out->toast_duration_ms = u16;
+    if (nvs_get_u8(h, "tmr_vol", &u8) == ESP_OK) out->timer_audio_volume_pct = u8;
+    if (nvs_get_u8(h, "tmr_repeat", &u8) == ESP_OK) out->timer_repeat_until_dismissed = u8 != 0;
+    if (nvs_get_u8(h, "tmr_gap", &u8) == ESP_OK) out->timer_repeat_gap_s = u8;
+    if (nvs_get_u8(h, "tmr_snooze", &u8) == ESP_OK) out->timer_snooze_min = u8;
+    if (nvs_get_u8(h, "tmr_snz_lim", &u8) == ESP_OK) out->timer_snooze_limit = u8;
+    if (nvs_get_u16(h, "tmr_def_s", &u16) == ESP_OK) out->timer_default_seconds = u16;
+    if (nvs_get_u16(h, "tmr_q1", &u16) == ESP_OK) out->timer_quick_seconds[0] = u16;
+    if (nvs_get_u16(h, "tmr_q2", &u16) == ESP_OK) out->timer_quick_seconds[1] = u16;
+    if (nvs_get_u16(h, "tmr_q3", &u16) == ESP_OK) out->timer_quick_seconds[2] = u16;
+    if (nvs_get_u16(h, "tmr_q4", &u16) == ESP_OK) out->timer_quick_seconds[3] = u16;
+    if (nvs_get_u16(h, "tmr_h1", &u16) == ESP_OK) out->timer_history_seconds[0] = u16;
+    if (nvs_get_u16(h, "tmr_h2", &u16) == ESP_OK) out->timer_history_seconds[1] = u16;
+    if (nvs_get_u16(h, "tmr_h3", &u16) == ESP_OK) out->timer_history_seconds[2] = u16;
+    if (nvs_get_u16(h, "tmr_h4", &u16) == ESP_OK) out->timer_history_seconds[3] = u16;
+    if (nvs_get_u16(h, "tmr_pre", &u16) == ESP_OK) out->timer_prealert_s = u16;
+    if (nvs_get_u8(h, "tmr_light", &u8) == ESP_OK) out->timer_finish_light_action = u8;
+    size_t str_len = sizeof(out->timer_audio_path);
+    (void)nvs_get_str(h, "tmr_audio", out->timer_audio_path, &str_len);
     nvs_close(h);
 
     app_config_tuning_clamp(out);
@@ -366,6 +430,7 @@ esp_err_t app_config_tuning_save(const app_tuning_config_t *cfg)
     if (err == ESP_OK) err = nvs_set_u8(h, "wx_ui", clean.weather_page_update_s);
     if (err == ESP_OK) err = nvs_set_u8(h, "wl_poll", clean.wled_poll_s);
     if (err == ESP_OK) err = nvs_set_u8(h, "wl_stale", clean.wled_stale_s);
+    if (err == ESP_OK) err = nvs_set_u8(h, "wl_hue_hz", clean.wled_hue_update_hz);
     if (err == ESP_OK) err = nvs_set_u8(h, "bl_auto", clean.auto_brightness_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u8(h, "bl_min", clean.auto_brightness_min_pct);
     if (err == ESP_OK) err = nvs_set_u8(h, "bl_max", clean.auto_brightness_max_pct);
@@ -377,8 +442,27 @@ esp_err_t app_config_tuning_save(const app_tuning_config_t *cfg)
     if (err == ESP_OK) err = nvs_set_u8(h, "idle_wlon", clean.idle_dismiss_lights_on ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u8(h, "idle_wlt_on", clean.idle_dismiss_lights_timer_on ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u16(h, "idle_wlt_min", clean.idle_dismiss_lights_timer_min);
+    if (err == ESP_OK) err = nvs_set_u16(h, "idle_swp_min", clean.idle_swipe_dismiss_min);
+    if (err == ESP_OK) err = nvs_set_u8(h, "idle_swp_wl", clean.idle_swipe_wake_lights_on ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u8(h, "stat_upd", clean.status_bar_update_s);
     if (err == ESP_OK) err = nvs_set_u16(h, "toast_ms", clean.toast_duration_ms);
+    if (err == ESP_OK) err = nvs_set_u8(h, "tmr_vol", clean.timer_audio_volume_pct);
+    if (err == ESP_OK) err = nvs_set_u8(h, "tmr_repeat", clean.timer_repeat_until_dismissed ? 1 : 0);
+    if (err == ESP_OK) err = nvs_set_u8(h, "tmr_gap", clean.timer_repeat_gap_s);
+    if (err == ESP_OK) err = nvs_set_u8(h, "tmr_snooze", clean.timer_snooze_min);
+    if (err == ESP_OK) err = nvs_set_u8(h, "tmr_snz_lim", clean.timer_snooze_limit);
+    if (err == ESP_OK) err = nvs_set_u16(h, "tmr_def_s", clean.timer_default_seconds);
+    if (err == ESP_OK) err = nvs_set_u16(h, "tmr_q1", clean.timer_quick_seconds[0]);
+    if (err == ESP_OK) err = nvs_set_u16(h, "tmr_q2", clean.timer_quick_seconds[1]);
+    if (err == ESP_OK) err = nvs_set_u16(h, "tmr_q3", clean.timer_quick_seconds[2]);
+    if (err == ESP_OK) err = nvs_set_u16(h, "tmr_q4", clean.timer_quick_seconds[3]);
+    if (err == ESP_OK) err = nvs_set_u16(h, "tmr_h1", clean.timer_history_seconds[0]);
+    if (err == ESP_OK) err = nvs_set_u16(h, "tmr_h2", clean.timer_history_seconds[1]);
+    if (err == ESP_OK) err = nvs_set_u16(h, "tmr_h3", clean.timer_history_seconds[2]);
+    if (err == ESP_OK) err = nvs_set_u16(h, "tmr_h4", clean.timer_history_seconds[3]);
+    if (err == ESP_OK) err = nvs_set_u16(h, "tmr_pre", clean.timer_prealert_s);
+    if (err == ESP_OK) err = nvs_set_u8(h, "tmr_light", clean.timer_finish_light_action);
+    if (err == ESP_OK) err = nvs_set_str(h, "tmr_audio", clean.timer_audio_path);
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
     return err;

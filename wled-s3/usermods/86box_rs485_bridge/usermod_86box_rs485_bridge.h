@@ -70,8 +70,38 @@
 #define USERMOD_86BOX_PSU_RELAY_MIN_CYCLE_MS 1500UL
 #endif
 
+#ifndef USERMOD_86BOX_RS485_SELF_HEAL_ENABLED
+#define USERMOD_86BOX_RS485_SELF_HEAL_ENABLED 1
+#endif
+
+#ifndef USERMOD_86BOX_RS485_SELF_HEAL_CHECK_MS
+#define USERMOD_86BOX_RS485_SELF_HEAL_CHECK_MS 10000UL
+#endif
+
+#ifndef USERMOD_86BOX_RS485_SELF_HEAL_STALE_RESET_MS
+#define USERMOD_86BOX_RS485_SELF_HEAL_STALE_RESET_MS 90000UL
+#endif
+
+#ifndef USERMOD_86BOX_RS485_SELF_HEAL_REBOOT_MS
+#define USERMOD_86BOX_RS485_SELF_HEAL_REBOOT_MS 900000UL
+#endif
+
+#ifndef USERMOD_86BOX_RS485_SELF_HEAL_REBOOT_AFTER_RESETS
+#define USERMOD_86BOX_RS485_SELF_HEAL_REBOOT_AFTER_RESETS 3U
+#endif
+
+#ifndef USERMOD_86BOX_RS485_SELF_HEAL_ERROR_RESET_COUNT
+#define USERMOD_86BOX_RS485_SELF_HEAL_ERROR_RESET_COUNT 6U
+#endif
+
 class Usermod86BoxRs485Bridge : public Usermod {
 private:
+  enum Rs485SelfHealState : uint8_t {
+    RS485_SELF_HEAL_OK,
+    RS485_SELF_HEAL_UART_RESET,
+    RS485_SELF_HEAL_REBOOT_PENDING
+  };
+
   HardwareSerial bridgeSerial;
   String lineBuffer;
   unsigned long lastStatusMs = 0;
@@ -99,6 +129,15 @@ private:
   unsigned long psuRelayChangedMs = 0;
   unsigned long psuRelayOnSinceMs = 0;
   unsigned long psuRelayOffRequestedMs = 0;
+  unsigned long lastSelfHealMs = 0;
+  unsigned long lastRs485ResetMs = 0;
+  uint32_t lastRs485ResetErrorCount = 0;
+  uint32_t rs485ResetCount = 0;
+  uint8_t rs485ConsecutiveResetCount = 0;
+  uint32_t selfHealRebootCount = 0;
+  Rs485SelfHealState selfHealState = RS485_SELF_HEAL_OK;
+  bool selfHealRebootPending = false;
+  bool rs485PinsReady = false;
 
   static bool elapsed(unsigned long since, unsigned long interval)
   {
@@ -118,6 +157,9 @@ private:
     lastValidRxMs = millis();
     p4LinkSeen = true;
     p4LinkOnline = true;
+    rs485ConsecutiveResetCount = 0;
+    selfHealRebootPending = false;
+    selfHealState = RS485_SELF_HEAL_OK;
   }
 
   void serviceRs485LinkState()
@@ -131,6 +173,110 @@ private:
     if (p4LinkOnline && lastValidRxMs != 0 && elapsed(lastValidRxMs, USERMOD_86BOX_RS485_LINK_TIMEOUT_MS)) {
       p4LinkOnline = false;
     }
+  }
+
+  const char *selfHealStateText() const
+  {
+    switch (selfHealState) {
+      case RS485_SELF_HEAL_UART_RESET: return "uart reset";
+      case RS485_SELF_HEAL_REBOOT_PENDING: return "reboot pending";
+      default: return "ok";
+    }
+  }
+
+  void restartRs485Bridge(bool countConsecutiveReset)
+  {
+#if USERMOD_86BOX_RS485_SELF_HEAL_ENABLED
+    if (!serialReady) return;
+    bridgeSerial.flush();
+    bridgeSerial.end();
+    delay(5);
+#ifdef USERMOD_86BOX_RS485_DE
+    setTransmitMode(false);
+#endif
+    lineBuffer = "";
+    lineOverflow = false;
+    bridgeSerial.begin(USERMOD_86BOX_RS485_BAUD, SERIAL_8N1,
+                       USERMOD_86BOX_RS485_RX, USERMOD_86BOX_RS485_TX);
+    lastStatusMs = 0;
+    lastRxByteMs = 0;
+    lastRs485ResetMs = millis();
+    rs485ResetCount++;
+    if (countConsecutiveReset && rs485ConsecutiveResetCount < UINT8_MAX) rs485ConsecutiveResetCount++;
+    lastRs485ResetErrorCount = rxErrorCount;
+    selfHealState = RS485_SELF_HEAL_UART_RESET;
+    USER_PRINTLN(F("86Box RS485 bridge self-heal: UART restarted"));
+#endif
+  }
+
+  void releaseRs485Pins()
+  {
+    if (!rs485PinsReady) return;
+    pinManager.deallocatePin(USERMOD_86BOX_RS485_TX, PinOwner::UM_Unspecified);
+    pinManager.deallocatePin(USERMOD_86BOX_RS485_RX, PinOwner::UM_Unspecified);
+#ifdef USERMOD_86BOX_RS485_DE
+    pinManager.deallocatePin(USERMOD_86BOX_RS485_DE, PinOwner::UM_Unspecified);
+#endif
+    rs485PinsReady = false;
+  }
+
+  bool configureRs485Pins()
+  {
+    releaseRs485Pins();
+    bool ok = pinManager.allocatePin(USERMOD_86BOX_RS485_TX, true, PinOwner::UM_Unspecified) &&
+              pinManager.allocatePin(USERMOD_86BOX_RS485_RX, false, PinOwner::UM_Unspecified);
+#ifdef USERMOD_86BOX_RS485_DE
+    ok = ok && pinManager.allocatePin(USERMOD_86BOX_RS485_DE, true, PinOwner::UM_Unspecified);
+#endif
+    if (!ok) {
+      releaseRs485Pins();
+      USER_PRINTLN(F("86Box RS485 bridge: pin allocation failed"));
+      return false;
+    }
+    rs485PinsReady = true;
+    return true;
+  }
+
+  void requestSelfHealReboot()
+  {
+#if USERMOD_86BOX_RS485_SELF_HEAL_ENABLED
+    if (selfHealRebootPending) return;
+    selfHealRebootPending = true;
+    selfHealState = RS485_SELF_HEAL_REBOOT_PENDING;
+    selfHealRebootCount++;
+    errorFlag = ERR_SYS_REBOOT;
+    doReboot = true;
+    USER_PRINT(F("86Box RS485 self-heal requesting reboot: "));
+    USER_PRINTLN(selfHealStateText());
+#endif
+  }
+
+  void serviceSelfHeal()
+  {
+#if USERMOD_86BOX_RS485_SELF_HEAL_ENABLED
+    unsigned long now = millis();
+    if (lastSelfHealMs != 0 && now - lastSelfHealMs < USERMOD_86BOX_RS485_SELF_HEAL_CHECK_MS) return;
+    lastSelfHealMs = now;
+
+    if (rxErrorCount - lastRs485ResetErrorCount >= USERMOD_86BOX_RS485_SELF_HEAL_ERROR_RESET_COUNT) {
+      restartRs485Bridge(true);
+      return;
+    }
+
+    if (!p4LinkSeen || lastValidRxMs == 0 || p4LinkOnline) return;
+
+    unsigned long staleMs = now - lastValidRxMs;
+    if (staleMs >= USERMOD_86BOX_RS485_SELF_HEAL_STALE_RESET_MS &&
+        (lastRs485ResetMs == 0 || now - lastRs485ResetMs >= USERMOD_86BOX_RS485_SELF_HEAL_STALE_RESET_MS)) {
+      restartRs485Bridge(false);
+    }
+
+    if (USERMOD_86BOX_RS485_SELF_HEAL_REBOOT_AFTER_RESETS > 0 &&
+        rs485ConsecutiveResetCount >= USERMOD_86BOX_RS485_SELF_HEAL_REBOOT_AFTER_RESETS &&
+        staleMs >= USERMOD_86BOX_RS485_SELF_HEAL_REBOOT_MS) {
+      requestSelfHealReboot();
+    }
+#endif
   }
 
   static bool jsonTruthy(JsonVariant value, bool fallback)
@@ -282,6 +428,19 @@ private:
            root.containsKey(F("if"));
   }
 
+  static bool hasNetworkCredentials(JsonObject root)
+  {
+    JsonObject network = root[F("nw")].as<JsonObject>();
+    if (network.isNull()) return false;
+
+    JsonArray interfaces = network[F("ins")].as<JsonArray>();
+    if (interfaces.isNull() || interfaces.size() == 0) return false;
+
+    JsonObject station = interfaces[0].as<JsonObject>();
+    return !station.isNull() &&
+           (station.containsKey(F("ssid")) || station.containsKey(F("psk")));
+  }
+
   void setTransmitMode(bool transmitting)
   {
 #ifdef USERMOD_86BOX_RS485_DE
@@ -404,8 +563,13 @@ private:
   void applyConfig(JsonObject root)
   {
 #ifndef USERMOD_86BOX_RS485_DISABLE_CONFIG_APPLY
+    bool reconnectWifi = hasNetworkCredentials(root);
     deserializeConfig(root, false);
     serializeConfig();
+    if (reconnectWifi) {
+      forceReconnect = true;
+      USER_PRINTLN(F("86Box RS485 bridge: WiFi reconnect requested"));
+    }
 #else
     (void)root;
 #endif
@@ -493,6 +657,8 @@ public:
 
   void setup() override
   {
+    if (!configureRs485Pins()) return;
+
 #ifdef USERMOD_86BOX_RS485_DE
     pinMode(USERMOD_86BOX_RS485_DE, OUTPUT);
     setTransmitMode(false);
@@ -504,12 +670,18 @@ public:
     serialReady = true;
     configurePsuRelay();
     initDone = true;
+    USER_PRINTF("86Box RS485 bridge ready: UART%d TX%d RX%d @ %lu\n",
+                USERMOD_86BOX_RS485_UART,
+                USERMOD_86BOX_RS485_TX,
+                USERMOD_86BOX_RS485_RX,
+                (unsigned long)USERMOD_86BOX_RS485_BAUD);
   }
 
   void loop() override
   {
     servicePsuRelay();
     serviceRs485LinkState();
+    serviceSelfHeal();
 
     while (serialReady && bridgeSerial.available() > 0) {
       int received = bridgeSerial.read();
@@ -565,6 +737,15 @@ public:
 
     JsonArray relayInfo = usermodsInfo.createNestedArray(F("86Box PSU Relay"));
     relayInfo.add(relayDetail);
+
+    char healthDetail[128];
+    snprintf(healthDetail, sizeof(healthDetail), "uart resets %lu, consecutive %u, reboots %lu, %s",
+             (unsigned long)rs485ResetCount,
+             rs485ConsecutiveResetCount,
+             (unsigned long)selfHealRebootCount,
+             selfHealStateText());
+    JsonArray healthInfo = usermodsInfo.createNestedArray(F("86Box RS485 Self-Heal"));
+    healthInfo.add(healthDetail);
   }
 
   void addToConfig(JsonObject &root) override

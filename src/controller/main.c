@@ -4,11 +4,12 @@
  * Boot order (will grow as phases land):
  *   - log chip / PSRAM / clock info
  *   - state stores (LED/settings, weather cache)
+ *   - microphone capture + FFT before large DMA consumers
  *   - ui_init()       — display + LVGL
  *   - cmd_tx_init()   — RS-485 WLED command transport
  *   - wifi_sta_init() — esp_wifi_remote/esp_hosted when enabled
  *   - weather_task    — OpenWeatherMap when Wi-Fi + config are present
- *   - audio/sound-sync hooks report disabled until those pipelines land
+ *   - sound sync      — UDP WLED-MM audio packets once Wi-Fi is online
  */
 
 #include <stdio.h>
@@ -22,6 +23,7 @@
 #include "board_pins.h"
 #include "ui/ui_init.h"
 #include "services/services.h"
+#include "services/audio_out.h"
 #include "services/led_state.h"
 #include "services/sd_storage.h"
 #include "services/slave_ota.h"
@@ -77,6 +79,12 @@ void app_main(void)
      * Slot 0 (SD) and Slot 1 (SDIO Wi-Fi) active in the same boot.       */
     ui_background_pre_init();
 
+    /* Audio needs DMA-capable internal memory. Bring it up before LVGL's
+     * draw buffers and Wi-Fi tasks consume or fragment that heap. */
+    audio_in_init();
+    audio_fft_init();
+    audio_out_init();
+
     /* Phase 1.5 — display + LVGL bring-up + main UI. */
     ui_init();
 
@@ -92,8 +100,10 @@ void app_main(void)
     slave_ota_init();
     provision_init();
     link_health_init();
-    audio_in_init();
-    audio_fft_init();
+    esp_err_t serial_debug_err = serial_debug_init();
+    if (serial_debug_err != ESP_OK) {
+        ESP_LOGW(TAG, "Serial diagnostics init failed: %s", esp_err_to_name(serial_debug_err));
+    }
     sound_sync_tx_init();
 
     /* Heartbeat until the rest of the system comes online. */

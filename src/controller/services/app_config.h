@@ -23,6 +23,10 @@ typedef struct {
     int32_t lon_x1e6;
 } app_weather_config_t;
 
+#define APP_TIMER_AUDIO_PATH_MAX 128
+#define APP_TIMER_QUICK_PRESET_COUNT 4
+#define APP_TIMER_HISTORY_COUNT 4
+
 typedef struct {
     uint16_t weather_refresh_min;
     uint16_t weather_retry_s;
@@ -34,6 +38,7 @@ typedef struct {
     uint8_t weather_page_update_s;
     uint8_t wled_poll_s;
     uint8_t wled_stale_s;
+    uint8_t wled_hue_update_hz;
     bool auto_brightness_enabled;
     uint8_t auto_brightness_min_pct;
     uint8_t auto_brightness_max_pct;
@@ -45,8 +50,21 @@ typedef struct {
     bool idle_dismiss_lights_on;
     bool idle_dismiss_lights_timer_on;
     uint16_t idle_dismiss_lights_timer_min;
+    uint16_t idle_swipe_dismiss_min;
+    bool idle_swipe_wake_lights_on;
     uint8_t status_bar_update_s;
     uint16_t toast_duration_ms;
+    uint8_t timer_audio_volume_pct;
+    bool timer_repeat_until_dismissed;
+    uint8_t timer_repeat_gap_s;
+    uint8_t timer_snooze_min;
+    uint8_t timer_snooze_limit;
+    uint16_t timer_default_seconds;
+    uint16_t timer_quick_seconds[APP_TIMER_QUICK_PRESET_COUNT];
+    uint16_t timer_history_seconds[APP_TIMER_HISTORY_COUNT];
+    uint16_t timer_prealert_s;
+    uint8_t timer_finish_light_action;
+    char timer_audio_path[APP_TIMER_AUDIO_PATH_MAX];
 } app_tuning_config_t;
 
 #define APP_THEME_MAX_IMAGES 8

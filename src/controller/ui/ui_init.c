@@ -19,11 +19,14 @@
 #include "ui_background.h"
 
 static const char *TAG = "ui_init";
+static lv_obj_t *s_weather_page;
+static lv_obj_t *s_timer_page;
 
 static void main_nav_page_shown(lv_obj_t *page, void *user_data)
 {
-    lv_obj_t *weather_page = (lv_obj_t *)user_data;
-    if (page == weather_page) screen_weather_activate();
+    (void)user_data;
+    if (page == s_weather_page) screen_weather_activate();
+    idle_manager_set_inhibited(page == s_timer_page);
 }
 
 static void build_main_ui(void)
@@ -54,9 +57,11 @@ static void build_main_ui(void)
     nav_pages_t pages = {0};
     pages.lights_page   = screen_lights_create(content);
     pages.weather_page  = screen_weather_create(content);
+    pages.timer_page    = screen_timer_create(content);
     pages.settings_page = screen_settings_create(content);
+    s_weather_page = pages.weather_page;
+    s_timer_page = pages.timer_page;
     pages.page_shown_cb = main_nav_page_shown;
-    pages.page_shown_user_data = pages.weather_page;
 
     lv_obj_t *navwrap = lv_obj_create(scr);
     lv_obj_remove_style_all(navwrap);
