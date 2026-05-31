@@ -15,7 +15,7 @@
 static const char *TAG = "idle_mgr";
 
 enum {
-    WAKE_TIMER_PANEL_W = 357,
+    WAKE_TIMER_PANEL_W = 390,
     WAKE_TIMER_PANEL_H = 144,
     WAKE_TIMER_ARC_SIZE = 108,
     WAKE_TIMER_MARGIN = 12,
@@ -192,12 +192,12 @@ static void wake_timer_ensure_panel(void)
     lv_obj_clear_flag(col, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *title = lv_label_create(col);
-    lv_label_set_text(title, "Wake Lights");
+    lv_label_set_text(title, "Light Timer");
     lv_obj_set_style_text_color(title, THEME_TEXT_PRIMARY, LV_PART_MAIN);
     lv_obj_set_style_text_font(title, THEME_FONT_TITLE, LV_PART_MAIN);
 
     s_wake_timer_detail = lv_label_create(col);
-    lv_label_set_text(s_wake_timer_detail, "Auto-off");
+    lv_label_set_text(s_wake_timer_detail, "Double tap to dismiss");
     lv_obj_set_style_text_color(s_wake_timer_detail, THEME_TEXT_MUTED, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_wake_timer_detail, THEME_FONT_BODY, LV_PART_MAIN);
 
@@ -271,11 +271,7 @@ static void wake_timer_update_panel(void)
     }
     if (s_wake_timer_time) lv_label_set_text(s_wake_timer_time, time_text);
 
-    char detail[28];
-    if (minutes >= 60u) snprintf(detail, sizeof(detail), "%luh %02lum left", (unsigned long)(minutes / 60u),
-                                 (unsigned long)(minutes % 60u));
-    else snprintf(detail, sizeof(detail), "%lu min left", (unsigned long)((remaining_s + 59u) / 60u));
-    if (s_wake_timer_detail) lv_label_set_text(s_wake_timer_detail, detail);
+    if (s_wake_timer_detail) lv_label_set_text(s_wake_timer_detail, "Double tap to dismiss");
 
     uint32_t remaining_progress = 0u;
     if (s_wake_lights_duration_ms) {
@@ -360,14 +356,18 @@ static void idle_handle_dismissed(bool wake_lights_allowed)
     if (!wake_lights_allowed) return;
     if (!tuning.idle_dismiss_lights_on) return;
 
-    idle_start_wake_lights_hold(&tuning);
-
     led_state_t ls;
     led_state_get(&ls);
-    if (!ls.power) {
-        led_state_set_power(true);
+    if (ls.power) {
+        if (s_wake_lights_timer_on) wake_timer_update_panel();
+        else wake_timer_delete_panel();
+        ESP_LOGI(TAG, "idle dismiss lights already on; light timer skipped");
+        return;
     }
-    ESP_LOGI(TAG, "idle dismiss wake lights on%s", tuning.idle_dismiss_lights_timer_on ? " with timer" : "");
+
+    idle_start_wake_lights_hold(&tuning);
+    led_state_set_power(true);
+    ESP_LOGI(TAG, "idle dismiss lights on%s", tuning.idle_dismiss_lights_timer_on ? " with timer" : "");
 }
 
 static bool idle_snooze_active(uint32_t now)

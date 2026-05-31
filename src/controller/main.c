@@ -26,7 +26,6 @@
 #include "services/audio_out.h"
 #include "services/led_state.h"
 #include "services/sd_storage.h"
-#include "services/slave_ota.h"
 #include "services/wled_state.h"
 #include "ui/backlight_manager.h"
 #include "ui/ui_background.h"
@@ -97,7 +96,6 @@ void app_main(void)
     wled_state_init();
     cmd_tx_init();
     wifi_sta_init();
-    slave_ota_init();
     provision_init();
     link_health_init();
     esp_err_t serial_debug_err = serial_debug_init();

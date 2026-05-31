@@ -26,6 +26,7 @@ typedef struct {
 #define APP_TIMER_AUDIO_PATH_MAX 128
 #define APP_TIMER_QUICK_PRESET_COUNT 4
 #define APP_TIMER_HISTORY_COUNT 4
+#define APP_TIMER_MAX_SECONDS (10u * 60u * 60u)
 
 typedef struct {
     uint16_t weather_refresh_min;
@@ -64,6 +65,8 @@ typedef struct {
     uint16_t timer_history_seconds[APP_TIMER_HISTORY_COUNT];
     uint16_t timer_prealert_s;
     uint8_t timer_finish_light_action;
+    bool timer_auto_show_on_finish;
+    bool timer_show_finish_toast;
     char timer_audio_path[APP_TIMER_AUDIO_PATH_MAX];
 } app_tuning_config_t;
 

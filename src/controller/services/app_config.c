@@ -288,6 +288,8 @@ void app_config_tuning_defaults(app_tuning_config_t *out)
     }
     out->timer_prealert_s = 10;
     out->timer_finish_light_action = 0;
+    out->timer_auto_show_on_finish = true;
+    out->timer_show_finish_toast = false;
     out->timer_audio_path[0] = '\0';
 }
 
@@ -329,17 +331,19 @@ static void app_config_tuning_clamp(app_tuning_config_t *cfg)
     cfg->timer_repeat_gap_s = clamp_u8(cfg->timer_repeat_gap_s, 0, 30);
     cfg->timer_snooze_min = clamp_u8(cfg->timer_snooze_min, 1, 30);
     cfg->timer_snooze_limit = clamp_u8(cfg->timer_snooze_limit, 0, 10);
-    cfg->timer_default_seconds = clamp_u16(cfg->timer_default_seconds, 30, 7200);
+    cfg->timer_default_seconds = clamp_u16(cfg->timer_default_seconds, 30, APP_TIMER_MAX_SECONDS);
     for (size_t i = 0; i < APP_TIMER_QUICK_PRESET_COUNT; i++) {
-        cfg->timer_quick_seconds[i] = clamp_u16(cfg->timer_quick_seconds[i], 10, 7200);
+        cfg->timer_quick_seconds[i] = clamp_u16(cfg->timer_quick_seconds[i], 10, APP_TIMER_MAX_SECONDS);
     }
     for (size_t i = 0; i < APP_TIMER_HISTORY_COUNT; i++) {
         if (cfg->timer_history_seconds[i] > 0) {
-            cfg->timer_history_seconds[i] = clamp_u16(cfg->timer_history_seconds[i], 1, 7200);
+            cfg->timer_history_seconds[i] = clamp_u16(cfg->timer_history_seconds[i], 1, APP_TIMER_MAX_SECONDS);
         }
     }
     cfg->timer_prealert_s = clamp_u16(cfg->timer_prealert_s, 0, 300);
     cfg->timer_finish_light_action = clamp_u8(cfg->timer_finish_light_action, 0, 3);
+    cfg->timer_auto_show_on_finish = cfg->timer_auto_show_on_finish ? true : false;
+    cfg->timer_show_finish_toast = cfg->timer_show_finish_toast ? true : false;
     cfg->timer_audio_path[sizeof(cfg->timer_audio_path) - 1] = '\0';
     if (has_line_break(cfg->timer_audio_path) ||
         (cfg->timer_audio_path[0] && strncmp(cfg->timer_audio_path, "/sdcard/", 8) != 0)) {
@@ -401,6 +405,8 @@ esp_err_t app_config_tuning_load(app_tuning_config_t *out)
     if (nvs_get_u16(h, "tmr_h4", &u16) == ESP_OK) out->timer_history_seconds[3] = u16;
     if (nvs_get_u16(h, "tmr_pre", &u16) == ESP_OK) out->timer_prealert_s = u16;
     if (nvs_get_u8(h, "tmr_light", &u8) == ESP_OK) out->timer_finish_light_action = u8;
+    if (nvs_get_u8(h, "tmr_auto_pg", &u8) == ESP_OK) out->timer_auto_show_on_finish = u8 != 0;
+    if (nvs_get_u8(h, "tmr_fn_toast", &u8) == ESP_OK) out->timer_show_finish_toast = u8 != 0;
     size_t str_len = sizeof(out->timer_audio_path);
     (void)nvs_get_str(h, "tmr_audio", out->timer_audio_path, &str_len);
     nvs_close(h);
@@ -462,6 +468,8 @@ esp_err_t app_config_tuning_save(const app_tuning_config_t *cfg)
     if (err == ESP_OK) err = nvs_set_u16(h, "tmr_h4", clean.timer_history_seconds[3]);
     if (err == ESP_OK) err = nvs_set_u16(h, "tmr_pre", clean.timer_prealert_s);
     if (err == ESP_OK) err = nvs_set_u8(h, "tmr_light", clean.timer_finish_light_action);
+    if (err == ESP_OK) err = nvs_set_u8(h, "tmr_auto_pg", clean.timer_auto_show_on_finish ? 1 : 0);
+    if (err == ESP_OK) err = nvs_set_u8(h, "tmr_fn_toast", clean.timer_show_finish_toast ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_str(h, "tmr_audio", clean.timer_audio_path);
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);

@@ -1,6 +1,7 @@
 #include "weather_api.h"
 
 #include "app_config.h"
+#include "sd_storage.h"
 #include "services.h"
 #include "weather_history.h"
 #include "weather_state.h"
@@ -428,11 +429,15 @@ static esp_err_t http_get(const char *url, http_body_t *body, int *out_status,
     };
     esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
     if (!client) return ESP_ERR_NO_MEM;
+    services_network_bulk_begin();
     services_https_lock();
+    sd_storage_set_network_busy(true);
     esp_err_t err = esp_http_client_perform(client);
     if (out_status) *out_status = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
+    sd_storage_set_network_busy(false);
     services_https_unlock();
+    services_network_bulk_end();
     return err;
 }
 

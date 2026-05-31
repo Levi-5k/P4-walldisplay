@@ -4,6 +4,7 @@
 #include "app_config.h"
 #include "audio_library.h"
 #include "audio_out.h"
+#include "nav_bar.h"
 #include "services.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -46,7 +47,12 @@ static lv_obj_t *s_outline_top = NULL;
 static lv_obj_t *s_outline_right = NULL;
 static lv_obj_t *s_outline_bottom = NULL;
 static lv_obj_t *s_outline_left = NULL;
+static lv_obj_t *s_outline_corner_tl = NULL;
+static lv_obj_t *s_outline_corner_tr = NULL;
+static lv_obj_t *s_outline_corner_br = NULL;
+static lv_obj_t *s_outline_corner_bl = NULL;
 static lv_obj_t *s_time_label = NULL;
+static lv_obj_t *s_time_inner_panel = NULL;
 static lv_obj_t *s_picker_panel = NULL;
 static lv_obj_t *s_hour_roller = NULL;
 static lv_obj_t *s_minute_roller = NULL;
@@ -80,25 +86,39 @@ static char *s_audio_options = NULL;
 static char s_selected_audio_path[AUDIO_OUT_PATH_MAX];
 static uint8_t s_audio_volume_pct = AUDIO_OUT_DEFAULT_VOLUME;
 static bool s_audio_download_was_busy = false;
+static bool s_audio_refresh_deferred = false;
 static uint32_t s_picker_seconds = 0;
 static bool s_picker_syncing = false;
 
 #define TIMER_AUDIO_OPTIONS_BYTES 2200
-#define TIMER_TIME_PANEL_W 410
+#define TIMER_PAGE_PAD_X 0
+#define TIMER_PAGE_PAD_Y 12
+#define TIMER_LAYOUT_GAP 12
+#define TIMER_CONTROL_GAP 16
+#define TIMER_TIME_PANEL_W 500
 #define TIMER_TIME_PANEL_H 224
-#define TIMER_TOP_ROW_H 244
-#define TIMER_OUTLINE_W 12
+#define TIMER_TOP_ROW_H 248
+#define TIMER_IDLE_TOP_ROW_H 304
+#define TIMER_OUTLINE_W 20
 #define TIMER_TIME_PANEL_RADIUS 22
-#define TIMER_PICKER_PANEL_W 444
-#define TIMER_HISTORY_PANEL_W 210
-#define TIMER_HISTORY_BTN_H 48
-#define TIMER_PICKER_ROLLER_W 132
-#define TIMER_PICKER_MAX_SECONDS 7200u
+#define TIMER_TIME_INNER_PAD TIMER_OUTLINE_W
+#define TIMER_TIME_INNER_RADIUS 4
+#define TIMER_PICKER_PANEL_W 460
+#define TIMER_PICKER_PANEL_H 292
+#define TIMER_HISTORY_PANEL_W 208
+#define TIMER_HISTORY_BTN_H 64
+#define TIMER_HISTORY_GAP 12
+#define TIMER_PICKER_ROLLER_W 140
+#define TIMER_PICKER_VISIBLE_ROWS 7
+#define TIMER_PICKER_MAX_SECONDS APP_TIMER_MAX_SECONDS
+#define TIMER_PICKER_MAX_HOURS (TIMER_PICKER_MAX_SECONDS / 3600u)
 #define TIMER_PRESET_BTN_W 156
 #define TIMER_PRESET_BTN_H 68
-#define TIMER_ACTION_BTN_W 318
-#define TIMER_ACTION_BTN_H 106
-#define TIMER_ACTION_GAP 20
+#define TIMER_ACTION_ROW_H 112
+#define TIMER_ACTION_BTN_W 324
+#define TIMER_ACTION_BTN_H 104
+#define TIMER_FINISHED_BTN_W 236
+#define TIMER_SNOOZE_BTN_W 156
 
 static void timer_audio_refresh_files(bool show_toast);
 static void timer_refresh_quick_labels(void);
@@ -170,6 +190,13 @@ static void timer_outline_segment_set(lv_obj_t *obj, lv_coord_t x, lv_coord_t y,
     lv_obj_set_size(obj, w, h);
 }
 
+static void timer_outline_corner_set(lv_obj_t *obj, bool visible)
+{
+    if (!obj) return;
+    if (visible) lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void timer_outline_set_color(lv_color_t color, lv_opa_t opa)
 {
     lv_obj_t *segments[] = {s_outline_top, s_outline_right, s_outline_bottom, s_outline_left};
@@ -177,9 +204,25 @@ static void timer_outline_set_color(lv_color_t color, lv_opa_t opa)
         if (!segments[i]) continue;
         lv_obj_set_style_bg_color(segments[i], color, LV_PART_MAIN);
         lv_obj_set_style_bg_opa(segments[i], opa, LV_PART_MAIN);
-        lv_obj_set_style_shadow_color(segments[i], color, LV_PART_MAIN);
-        lv_obj_set_style_shadow_opa(segments[i], opa > LV_OPA_50 ? LV_OPA_30 : LV_OPA_TRANSP, LV_PART_MAIN);
     }
+
+    lv_obj_t *corners[] = {s_outline_corner_tl, s_outline_corner_tr, s_outline_corner_br, s_outline_corner_bl};
+    for (size_t i = 0; i < sizeof(corners) / sizeof(corners[0]); i++) {
+        if (!corners[i]) continue;
+        lv_obj_set_style_bg_color(corners[i], color, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(corners[i], opa, LV_PART_MAIN);
+    }
+}
+
+static uint32_t timer_outline_piece(uint32_t elapsed, uint32_t start, uint32_t length,
+                                    uint32_t *offset)
+{
+    if (offset) *offset = 0;
+    if (length == 0 || elapsed >= start + length) return 0;
+    if (elapsed <= start) return length;
+    uint32_t used = elapsed - start;
+    if (offset) *offset = used;
+    return length - used;
 }
 
 static uint32_t timer_remaining_ms(void)
@@ -202,7 +245,24 @@ static void timer_outline_set_progress_ms(uint32_t remaining_ms, uint32_t total_
 
     const uint32_t panel_w = TIMER_TIME_PANEL_W;
     const uint32_t panel_h = TIMER_TIME_PANEL_H;
-    const uint32_t perimeter = (panel_w * 2u) + (panel_h * 2u);
+    const uint32_t outline_w = TIMER_OUTLINE_W;
+    const uint32_t corner_half = outline_w / 2u;
+    const uint32_t top_len = panel_w - (outline_w * 2u);
+    const uint32_t right_len = panel_h - (outline_w * 2u);
+    const uint32_t bottom_len = top_len;
+    const uint32_t left_len = right_len;
+
+    const uint32_t tl_start = 0;
+    const uint32_t top_start = tl_start + corner_half;
+    const uint32_t tr_start = top_start + top_len;
+    const uint32_t right_start = tr_start + outline_w;
+    const uint32_t br_start = right_start + right_len;
+    const uint32_t bottom_start = br_start + outline_w;
+    const uint32_t bl_start = bottom_start + bottom_len;
+    const uint32_t left_start = bl_start + outline_w;
+    const uint32_t tl_end_start = left_start + left_len;
+    const uint32_t perimeter = tl_end_start + corner_half;
+
     uint32_t lit = 0;
     if (total_ms > 0 && remaining_ms > 0) {
         if (remaining_ms > total_ms) remaining_ms = total_ms;
@@ -210,29 +270,29 @@ static void timer_outline_set_progress_ms(uint32_t remaining_ms, uint32_t total_
     }
     uint32_t elapsed = perimeter > lit ? perimeter - lit : 0;
 
-    uint32_t top_start = 0;
-    uint32_t right_start = top_start + panel_w;
-    uint32_t bottom_start = right_start + panel_h;
-    uint32_t left_start = bottom_start + panel_w;
+    uint32_t top_offset = 0;
+    uint32_t right_offset = 0;
+    uint32_t top = timer_outline_piece(elapsed, top_start, top_len, &top_offset);
+    uint32_t right = timer_outline_piece(elapsed, right_start, right_len, &right_offset);
+    uint32_t bottom = timer_outline_piece(elapsed, bottom_start, bottom_len, NULL);
+    uint32_t left = timer_outline_piece(elapsed, left_start, left_len, NULL);
 
-    uint32_t top_a = elapsed > top_start ? elapsed : top_start;
-    uint32_t right_a = elapsed > right_start ? elapsed : right_start;
-    uint32_t bottom_a = elapsed > bottom_start ? elapsed : bottom_start;
-    uint32_t left_a = elapsed > left_start ? elapsed : left_start;
+    timer_outline_segment_set(s_outline_top, (lv_coord_t)(outline_w + top_offset), 0,
+                              (lv_coord_t)top, (lv_coord_t)outline_w);
+    timer_outline_segment_set(s_outline_right, (lv_coord_t)(panel_w - outline_w),
+                              (lv_coord_t)(outline_w + right_offset),
+                              (lv_coord_t)outline_w, (lv_coord_t)right);
+    timer_outline_segment_set(s_outline_bottom, (lv_coord_t)outline_w,
+                              (lv_coord_t)(panel_h - outline_w),
+                              (lv_coord_t)bottom, (lv_coord_t)outline_w);
+    timer_outline_segment_set(s_outline_left, 0, (lv_coord_t)outline_w,
+                              (lv_coord_t)outline_w, (lv_coord_t)left);
 
-    uint32_t top = top_a < right_start ? right_start - top_a : 0;
-    uint32_t right = right_a < bottom_start ? bottom_start - right_a : 0;
-    uint32_t bottom = bottom_a < left_start ? left_start - bottom_a : 0;
-    uint32_t left = left_a < perimeter ? perimeter - left_a : 0;
-
-    timer_outline_segment_set(s_outline_top, (lv_coord_t)(top_a - top_start), 0,
-                              (lv_coord_t)top, TIMER_OUTLINE_W);
-    timer_outline_segment_set(s_outline_right, TIMER_TIME_PANEL_W - TIMER_OUTLINE_W,
-                              (lv_coord_t)(right_a - right_start),
-                              TIMER_OUTLINE_W, (lv_coord_t)right);
-    timer_outline_segment_set(s_outline_bottom, 0, TIMER_TIME_PANEL_H - TIMER_OUTLINE_W,
-                              (lv_coord_t)bottom, TIMER_OUTLINE_W);
-    timer_outline_segment_set(s_outline_left, 0, 0, TIMER_OUTLINE_W, (lv_coord_t)left);
+    bool has_lit = lit > 0;
+    timer_outline_corner_set(s_outline_corner_tl, has_lit && (elapsed < top_start || elapsed >= left_start));
+    timer_outline_corner_set(s_outline_corner_tr, has_lit && elapsed < right_start);
+    timer_outline_corner_set(s_outline_corner_br, has_lit && elapsed < bottom_start);
+    timer_outline_corner_set(s_outline_corner_bl, has_lit && elapsed < left_start);
 }
 
 static void timer_outline_refresh(void)
@@ -273,11 +333,12 @@ static void timer_update_layout(void)
     timer_set_hidden(s_time_panel, idle);
     timer_set_hidden(s_picker_panel, !idle);
     timer_set_hidden(s_history_panel, !idle);
-    timer_set_hidden(s_preset_row, idle);
+    timer_set_hidden(s_preset_row, s_state == TIMER_STATE_FINISHED);
 
     if (s_top_row) {
+        lv_obj_set_height(s_top_row, idle ? TIMER_IDLE_TOP_ROW_H : TIMER_TOP_ROW_H);
         lv_obj_set_flex_align(s_top_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_pad_column(s_top_row, idle ? 18 : 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_column(s_top_row, idle ? TIMER_CONTROL_GAP : 0, LV_PART_MAIN);
     }
 }
 
@@ -287,12 +348,21 @@ static lv_obj_t *timer_outline_segment_create(lv_obj_t *parent)
     lv_obj_remove_style_all(segment);
     lv_obj_set_style_bg_color(segment, THEME_PRIMARY_COLOR, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(segment, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_radius(segment, TIMER_OUTLINE_W / 2, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(segment, 4, LV_PART_MAIN);
+    lv_obj_set_style_radius(segment, 0, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(segment, 0, LV_PART_MAIN);
     lv_obj_set_style_shadow_color(segment, THEME_PRIMARY_COLOR, LV_PART_MAIN);
-    lv_obj_set_style_shadow_opa(segment, LV_OPA_20, LV_PART_MAIN);
+    lv_obj_set_style_shadow_opa(segment, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_clear_flag(segment, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     return segment;
+}
+
+static lv_obj_t *timer_outline_corner_create(lv_obj_t *parent, lv_coord_t x, lv_coord_t y)
+{
+    lv_obj_t *corner = timer_outline_segment_create(parent);
+    lv_obj_set_pos(corner, x, y);
+    lv_obj_set_size(corner, TIMER_OUTLINE_W, TIMER_OUTLINE_W);
+    lv_obj_add_flag(corner, LV_OBJ_FLAG_HIDDEN);
+    return corner;
 }
 
 static void timer_audio_update_status(const char *text)
@@ -328,6 +398,14 @@ static bool timer_audio_storage_ready(void)
         if (!s_audio_options) s_audio_options = calloc(1, TIMER_AUDIO_OPTIONS_BYTES);
     }
     return s_audio_files && s_audio_options;
+}
+
+static bool timer_audio_sd_access_allowed(void)
+{
+    services_status_t status;
+    if (services_status_get(&status) != ESP_OK) return false;
+    if (services_network_bulk_active()) return false;
+    return !status.wifi_configured || status.wifi_connected;
 }
 
 static void timer_audio_update_download_button(uint8_t present, uint8_t total, bool busy)
@@ -373,6 +451,13 @@ static void timer_audio_update_prompt(void)
         }
         timer_audio_update_library_status(text);
     } else {
+        if (!timer_audio_sd_access_allowed()) {
+            s_audio_refresh_deferred = true;
+            timer_audio_set_library_visible(true);
+            timer_audio_update_library_status("Audio library pending");
+            timer_audio_update_download_button(0, AUDIO_LIBRARY_DOWNLOAD_BATCH_SIZE, false);
+            return;
+        }
         uint8_t present = 0;
         uint8_t total = 0;
         (void)audio_library_assets_present(&present, &total);
@@ -461,6 +546,19 @@ static void timer_audio_refresh_files(bool show_toast)
         if (show_toast) toast_show("Audio list unavailable");
         return;
     }
+
+    if (!timer_audio_sd_access_allowed()) {
+        s_audio_refresh_deferred = true;
+        s_audio_file_count = 0;
+        timer_audio_build_options();
+        if (s_audio_dropdown) lv_dropdown_set_options(s_audio_dropdown, s_audio_options);
+        timer_audio_update_status("Audio list pending");
+        timer_audio_update_prompt();
+        if (show_toast) toast_show("Audio list pending");
+        return;
+    }
+
+    s_audio_refresh_deferred = false;
 
     esp_err_t err = audio_out_list_wav(s_audio_files, AUDIO_OUT_MAX_LISTED, &s_audio_file_count);
     if (err != ESP_OK) {
@@ -553,6 +651,10 @@ static void timer_audio_download_poll_cb(lv_timer_t *timer)
         }
         timer_audio_update_prompt();
         return;
+    }
+
+    if (s_audio_refresh_deferred && timer_audio_sd_access_allowed()) {
+        timer_audio_refresh_files(false);
     }
 
     if (s_audio_download_btn) lv_obj_remove_state(s_audio_download_btn, LV_STATE_DISABLED);
@@ -663,7 +765,7 @@ static void update_time_display(void)
 
     char buf[32];
     if (h > 0) {
-        snprintf(buf, sizeof(buf), "%02" PRIu32 ":%02" PRIu32 ":%02" PRIu32, h, m, s);
+        snprintf(buf, sizeof(buf), "%" PRIu32 ":%02" PRIu32 ":%02" PRIu32, h, m, s);
         lv_obj_set_style_text_font(s_time_label, THEME_FONT_WX_TIME, LV_PART_MAIN);
     } else {
         snprintf(buf, sizeof(buf), "%02" PRIu32 ":%02" PRIu32, m, s);
@@ -699,17 +801,24 @@ static void update_buttons(void)
 
     if (finished) {
         if (s_start_btn) lv_obj_add_flag(s_start_btn, LV_OBJ_FLAG_HIDDEN);
-        lv_coord_t finished_w = snooze_available ? 214 : TIMER_ACTION_BTN_W;
+        lv_coord_t finished_w = snooze_available ? TIMER_FINISHED_BTN_W : TIMER_ACTION_BTN_W;
         if (s_repeat_btn) lv_obj_set_size(s_repeat_btn, finished_w, TIMER_ACTION_BTN_H);
-        if (s_snooze_btn) lv_obj_set_size(s_snooze_btn, 214, TIMER_ACTION_BTN_H);
+        if (s_snooze_btn) lv_obj_set_size(s_snooze_btn, TIMER_SNOOZE_BTN_W, TIMER_ACTION_BTN_H);
         if (s_reset_btn) {
             lv_obj_set_size(s_reset_btn, finished_w, TIMER_ACTION_BTN_H);
             lv_obj_remove_state(s_reset_btn, LV_STATE_DISABLED);
         }
         if (s_reset_btn_label) lv_label_set_text(s_reset_btn_label, "CLEAR");
         if (s_repeat_btn_label) lv_label_set_text(s_repeat_btn_label, LV_SYMBOL_REFRESH " REPEAT");
+        const lv_font_t *finished_font = snooze_available ? THEME_FONT_TITLE : THEME_FONT_XLARGE;
+        if (s_reset_btn_label) lv_obj_set_style_text_font(s_reset_btn_label, finished_font, LV_PART_MAIN);
+        if (s_repeat_btn_label) lv_obj_set_style_text_font(s_repeat_btn_label, finished_font, LV_PART_MAIN);
+        if (s_snooze_btn_label) lv_obj_set_style_text_font(s_snooze_btn_label, THEME_FONT_BODY, LV_PART_MAIN);
         return;
     }
+    if (s_reset_btn_label) lv_obj_set_style_text_font(s_reset_btn_label, THEME_FONT_XLARGE, LV_PART_MAIN);
+    if (s_repeat_btn_label) lv_obj_set_style_text_font(s_repeat_btn_label, THEME_FONT_XLARGE, LV_PART_MAIN);
+    if (s_snooze_btn_label) lv_obj_set_style_text_font(s_snooze_btn_label, THEME_FONT_TITLE, LV_PART_MAIN);
 
     if (s_start_btn) {
         lv_obj_remove_flag(s_start_btn, LV_OBJ_FLAG_HIDDEN);
@@ -769,7 +878,7 @@ static void anim_timer_cb(lv_timer_t *timer)
 
         if (s_time_panel) {
             timer_shadow_set_if_changed(s_time_panel, arc_shadow, THEME_PRIMARY_COLOR, arc_opa);
-            timer_outline_set_color(THEME_PRIMARY_COLOR, (lv_opa_t)(LV_OPA_70 + (int32_t)(35.0f * sin_val)));
+            timer_outline_set_color(THEME_PRIMARY_COLOR, LV_OPA_COVER);
         }
 
         if (s_start_btn) {
@@ -835,9 +944,10 @@ static void timer_tick_cb(lv_timer_t *timer)
             s_timer_deadline_ms = 0;
             s_blink_state = true;
             s_prealert_fired = true;
+            if (s_timer_cfg.timer_auto_show_on_finish) nav_bar_show_page(s_timer_root);
             update_time_display();
             update_buttons();
-            toast_show("Timer Finished! 🔔");
+            if (s_timer_cfg.timer_show_finish_toast) toast_show("Timer finished");
             timer_apply_finish_light_action();
             timer_alarm_play_and_schedule();
         }
@@ -951,6 +1061,17 @@ static uint32_t timer_picker_current_seconds(void)
     return timer_clamp_picker_seconds(s_picker_seconds);
 }
 
+static uint32_t timer_picker_raw_seconds(void)
+{
+    if (s_hour_roller && s_minute_roller && s_second_roller) {
+        uint32_t hours = lv_roller_get_selected(s_hour_roller);
+        uint32_t minutes = lv_roller_get_selected(s_minute_roller);
+        uint32_t seconds = lv_roller_get_selected(s_second_roller);
+        return (hours * 3600u) + (minutes * 60u) + seconds;
+    }
+    return s_picker_seconds;
+}
+
 static void timer_picker_set_seconds(uint32_t seconds, bool animate)
 {
     seconds = timer_clamp_picker_seconds(seconds);
@@ -1015,7 +1136,7 @@ static void timer_refresh_history_labels(void)
         char duration[28];
         char label[40];
         timer_format_duration_words(seconds, duration, sizeof(duration));
-        snprintf(label, sizeof(label), LV_SYMBOL_PLAY " %s", duration);
+        snprintf(label, sizeof(label), LV_SYMBOL_REFRESH " %s", duration);
         lv_label_set_text(s_history_labels[i], label);
         lv_obj_remove_state(s_history_btns[i], LV_STATE_DISABLED);
     }
@@ -1025,7 +1146,9 @@ static void timer_picker_changed_cb(lv_event_t *e)
 {
     (void)e;
     if (s_picker_syncing) return;
-    s_picker_seconds = timer_picker_current_seconds();
+    uint32_t raw_seconds = timer_picker_raw_seconds();
+    s_picker_seconds = timer_clamp_picker_seconds(raw_seconds);
+    if (raw_seconds != s_picker_seconds) timer_picker_set_seconds(s_picker_seconds, true);
     update_buttons();
 }
 
@@ -1055,12 +1178,15 @@ static void quick_preset_click_cb(lv_event_t *e)
     if (index >= APP_TIMER_QUICK_PRESET_COUNT) return;
     uint32_t seconds_to_add = s_timer_cfg.timer_quick_seconds[index];
 
+    if (s_state == TIMER_STATE_READY && s_remaining_seconds == 0 && s_total_seconds == 0) {
+        timer_start_duration_internal(seconds_to_add, true);
+        return;
+    }
+
     if (s_state == TIMER_STATE_FINISHED) {
         timer_stop_alarm();
-        s_state = TIMER_STATE_READY;
-        s_total_seconds = 0;
-        s_remaining_seconds = 0;
-        s_timer_deadline_ms = 0;
+        timer_start_duration_internal(seconds_to_add, true);
+        return;
     }
 
     uint32_t base_remaining_ms = timer_remaining_ms();
@@ -1125,9 +1251,9 @@ static void timer_build_range_options(char *buf, size_t len, uint32_t max_value,
 static lv_obj_t *timer_picker_roller_create(lv_obj_t *parent, const char *options)
 {
     lv_obj_t *roller = lv_roller_create(parent);
-    lv_obj_set_size(roller, TIMER_PICKER_ROLLER_W, TIMER_TIME_PANEL_H - 18);
     lv_roller_set_options(roller, options, LV_ROLLER_MODE_NORMAL);
-    lv_roller_set_visible_row_count(roller, 5);
+    lv_roller_set_visible_row_count(roller, TIMER_PICKER_VISIBLE_ROWS);
+    lv_obj_set_size(roller, TIMER_PICKER_ROLLER_W, TIMER_PICKER_PANEL_H - 18);
     lv_obj_set_scrollbar_mode(roller, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_style_bg_opa(roller, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(roller, 0, LV_PART_MAIN);
@@ -1144,12 +1270,12 @@ static lv_obj_t *timer_picker_roller_create(lv_obj_t *parent, const char *option
 
 static void timer_picker_create(lv_obj_t *parent)
 {
-    static char hour_options[32];
+    static char hour_options[128];
     static char minute_options[512];
     static char second_options[512];
 
     if (!hour_options[0]) {
-        timer_build_range_options(hour_options, sizeof(hour_options), 2, "hour", "hours");
+        timer_build_range_options(hour_options, sizeof(hour_options), TIMER_PICKER_MAX_HOURS, "hour", "hours");
         timer_build_range_options(minute_options, sizeof(minute_options), 59, "min", "min");
         timer_build_range_options(second_options, sizeof(second_options), 59, "sec", "sec");
     }
@@ -1157,7 +1283,7 @@ static void timer_picker_create(lv_obj_t *parent)
     s_picker_panel = lv_obj_create(parent);
     lv_obj_remove_style_all(s_picker_panel);
     theme_style_glass_panel(s_picker_panel, 20);
-    lv_obj_set_size(s_picker_panel, TIMER_PICKER_PANEL_W, TIMER_TIME_PANEL_H);
+    lv_obj_set_size(s_picker_panel, TIMER_PICKER_PANEL_W, TIMER_PICKER_PANEL_H);
     lv_obj_set_style_bg_color(s_picker_panel, lv_color_hex(0x06080F), LV_PART_MAIN);
     lv_obj_set_style_border_color(s_picker_panel, lv_color_hex(0x20283E), LV_PART_MAIN);
     lv_obj_set_style_border_width(s_picker_panel, 1, LV_PART_MAIN);
@@ -1166,7 +1292,7 @@ static void timer_picker_create(lv_obj_t *parent)
 
     lv_obj_t *selected_band = lv_obj_create(s_picker_panel);
     lv_obj_remove_style_all(selected_band);
-    lv_obj_set_size(selected_band, TIMER_PICKER_PANEL_W - 28, 58);
+    lv_obj_set_size(selected_band, TIMER_PICKER_PANEL_W - 28, 64);
     lv_obj_set_style_bg_color(selected_band, lv_color_hex(0x171A24), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(selected_band, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(selected_band, 22, LV_PART_MAIN);
@@ -1189,9 +1315,9 @@ static void timer_history_create(lv_obj_t *parent)
 {
     s_history_panel = lv_obj_create(parent);
     lv_obj_remove_style_all(s_history_panel);
-    lv_obj_set_size(s_history_panel, TIMER_HISTORY_PANEL_W, TIMER_TIME_PANEL_H);
+    lv_obj_set_size(s_history_panel, TIMER_HISTORY_PANEL_W, TIMER_PICKER_PANEL_H);
     lv_obj_set_flex_flow(s_history_panel, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(s_history_panel, 10, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(s_history_panel, TIMER_HISTORY_GAP, LV_PART_MAIN);
     lv_obj_clear_flag(s_history_panel, LV_OBJ_FLAG_SCROLLABLE);
 
     for (size_t i = 0; i < APP_TIMER_HISTORY_COUNT; i++) {
@@ -1230,8 +1356,9 @@ static lv_obj_t *page_root(lv_obj_t *parent)
     lv_obj_remove_style_all(p);
     lv_obj_set_size(p, LV_PCT(100), LV_PCT(100));
     lv_obj_set_flex_flow(p, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(p, 14, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(p, 16, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(p, TIMER_LAYOUT_GAP, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(p, TIMER_PAGE_PAD_X, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(p, TIMER_PAGE_PAD_Y, LV_PART_MAIN);
     lv_obj_clear_flag(p, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scrollbar_mode(p, LV_SCROLLBAR_MODE_OFF);
     return p;
@@ -1369,6 +1496,20 @@ static void timer_finish_light_cb(lv_event_t *e)
     timer_settings_save_config();
 }
 
+static void timer_auto_show_cb(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    s_timer_cfg.timer_auto_show_on_finish = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    timer_settings_save_config();
+}
+
+static void timer_finish_toast_cb(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    s_timer_cfg.timer_show_finish_toast = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    timer_settings_save_config();
+}
+
 static uint16_t timer_snooze_limit_index(uint8_t value)
 {
     switch (value) {
@@ -1410,7 +1551,7 @@ static lv_obj_t *timer_dropdown_row(lv_obj_t *parent, const char *label, const c
     return dd;
 }
 
-static void timer_repeat_row(lv_obj_t *parent)
+static lv_obj_t *timer_switch_row(lv_obj_t *parent, const char *label, bool checked, lv_event_cb_t cb)
 {
     lv_obj_t *row = lv_obj_create(parent);
     lv_obj_remove_style_all(row);
@@ -1420,16 +1561,24 @@ static void timer_repeat_row(lv_obj_t *parent)
     lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *name = lv_label_create(row);
-    lv_label_set_text(name, "Repeat Until Dismissed");
+    lv_label_set_text(name, label);
     lv_obj_set_width(name, 280);
     lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_font(name, THEME_FONT_BODY, LV_PART_MAIN);
     lv_obj_set_style_text_color(name, THEME_TEXT_SECONDARY, LV_PART_MAIN);
 
-    s_repeat_switch = lv_switch_create(row);
-    lv_obj_set_size(s_repeat_switch, 78, 40);
-    if (s_timer_cfg.timer_repeat_until_dismissed) lv_obj_add_state(s_repeat_switch, LV_STATE_CHECKED);
-    lv_obj_add_event_cb(s_repeat_switch, timer_repeat_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_t *sw = lv_switch_create(row);
+    lv_obj_set_size(sw, 78, 40);
+    if (checked) lv_obj_add_state(sw, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(sw, cb, LV_EVENT_VALUE_CHANGED, NULL);
+    return sw;
+}
+
+static void timer_repeat_row(lv_obj_t *parent)
+{
+    s_repeat_switch = timer_switch_row(parent, "Repeat Until Dismissed",
+                                       s_timer_cfg.timer_repeat_until_dismissed,
+                                       timer_repeat_switch_cb);
 }
 
 static int rd_timer_vol(void) { return s_timer_cfg.timer_audio_volume_pct; }
@@ -1537,6 +1686,12 @@ void screen_timer_settings_create(lv_obj_t *parent)
 
     lv_obj_t *behavior_card = timer_settings_card(parent, LV_SYMBOL_SETTINGS " Alarm Behavior");
     timer_repeat_row(behavior_card);
+    (void)timer_switch_row(behavior_card, "Open Timer On Finish",
+                           s_timer_cfg.timer_auto_show_on_finish,
+                           timer_auto_show_cb);
+    (void)timer_switch_row(behavior_card, "Show Finish Toast",
+                           s_timer_cfg.timer_show_finish_toast,
+                           timer_finish_toast_cb);
     timer_stepper_row(behavior_card, "Repeat Gap", 1, 0, 30, "s", ap_timer_gap, rd_timer_gap);
     timer_stepper_row(behavior_card, "Pre-Alert", 5, 0, 300, "s", ap_prealert_s, rd_prealert_s);
     s_finish_light_dropdown = timer_dropdown_row(behavior_card, "Finish Light Action",
@@ -1551,11 +1706,11 @@ void screen_timer_settings_create(lv_obj_t *parent)
                                                 timer_snooze_limit_cb);
 
     lv_obj_t *duration_card = timer_settings_card(parent, LV_SYMBOL_LIST " Durations");
-    timer_stepper_row(duration_card, "Default Timer", 30, 30, 7200, "s", ap_default_s, rd_default_s);
-    timer_stepper_row(duration_card, "Quick Preset 1", 10, 10, 7200, "s", ap_quick_1, rd_quick_1);
-    timer_stepper_row(duration_card, "Quick Preset 2", 10, 10, 7200, "s", ap_quick_2, rd_quick_2);
-    timer_stepper_row(duration_card, "Quick Preset 3", 30, 10, 7200, "s", ap_quick_3, rd_quick_3);
-    timer_stepper_row(duration_card, "Quick Preset 4", 30, 10, 7200, "s", ap_quick_4, rd_quick_4);
+    timer_stepper_row(duration_card, "Default Timer", 30, 30, APP_TIMER_MAX_SECONDS, "s", ap_default_s, rd_default_s);
+    timer_stepper_row(duration_card, "Quick Preset 1", 10, 10, APP_TIMER_MAX_SECONDS, "s", ap_quick_1, rd_quick_1);
+    timer_stepper_row(duration_card, "Quick Preset 2", 10, 10, APP_TIMER_MAX_SECONDS, "s", ap_quick_2, rd_quick_2);
+    timer_stepper_row(duration_card, "Quick Preset 3", 30, 10, APP_TIMER_MAX_SECONDS, "s", ap_quick_3, rd_quick_3);
+    timer_stepper_row(duration_card, "Quick Preset 4", 30, 10, APP_TIMER_MAX_SECONDS, "s", ap_quick_4, rd_quick_4);
 
     timer_audio_refresh_files(false);
     timer_audio_update_prompt();
@@ -1577,7 +1732,7 @@ lv_obj_t *screen_timer_create(lv_obj_t *parent)
     lv_obj_set_size(s_top_row, LV_PCT(100), TIMER_TOP_ROW_H);
     lv_obj_set_flex_flow(s_top_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(s_top_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(s_top_row, 18, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(s_top_row, TIMER_CONTROL_GAP, LV_PART_MAIN);
     lv_obj_clear_flag(s_top_row, LV_OBJ_FLAG_SCROLLABLE);
 
     s_time_panel = lv_obj_create(s_top_row);
@@ -1595,34 +1750,49 @@ lv_obj_t *screen_timer_create(lv_obj_t *parent)
     lv_obj_set_style_shadow_ofs_y(s_time_panel, 4, LV_PART_MAIN);
     lv_obj_clear_flag(s_time_panel, LV_OBJ_FLAG_SCROLLABLE);
 
-    s_time_label = lv_label_create(s_time_panel);
+    s_outline_top = timer_outline_segment_create(s_time_panel);
+    s_outline_right = timer_outline_segment_create(s_time_panel);
+    s_outline_bottom = timer_outline_segment_create(s_time_panel);
+    s_outline_left = timer_outline_segment_create(s_time_panel);
+    s_outline_corner_tl = timer_outline_corner_create(s_time_panel, 0, 0);
+    s_outline_corner_tr = timer_outline_corner_create(s_time_panel,
+                                                       TIMER_TIME_PANEL_W - TIMER_OUTLINE_W, 0);
+    s_outline_corner_br = timer_outline_corner_create(s_time_panel,
+                                                       TIMER_TIME_PANEL_W - TIMER_OUTLINE_W,
+                                                       TIMER_TIME_PANEL_H - TIMER_OUTLINE_W);
+    s_outline_corner_bl = timer_outline_corner_create(s_time_panel, 0,
+                                                       TIMER_TIME_PANEL_H - TIMER_OUTLINE_W);
+
+    s_time_inner_panel = lv_obj_create(s_time_panel);
+    lv_obj_remove_style_all(s_time_inner_panel);
+    lv_obj_set_pos(s_time_inner_panel, TIMER_TIME_INNER_PAD, TIMER_TIME_INNER_PAD);
+    lv_obj_set_size(s_time_inner_panel,
+                    TIMER_TIME_PANEL_W - (TIMER_TIME_INNER_PAD * 2),
+                    TIMER_TIME_PANEL_H - (TIMER_TIME_INNER_PAD * 2));
+    lv_obj_set_style_bg_color(s_time_inner_panel, lv_color_hex(0x0C1021), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_time_inner_panel, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_time_inner_panel, TIMER_TIME_INNER_RADIUS, LV_PART_MAIN);
+    lv_obj_set_style_clip_corner(s_time_inner_panel, true, LV_PART_MAIN);
+    lv_obj_clear_flag(s_time_inner_panel, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    s_time_label = lv_label_create(s_time_inner_panel);
     lv_label_set_text(s_time_label, "00:00");
-    lv_obj_set_width(s_time_label, TIMER_TIME_PANEL_W - 24);
+    lv_obj_set_width(s_time_label, TIMER_TIME_PANEL_W - (TIMER_TIME_INNER_PAD * 2) - 20);
     lv_label_set_long_mode(s_time_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(s_time_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_time_label, THEME_FONT_WX_TIME, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_time_label, THEME_TEXT_PRIMARY, LV_PART_MAIN);
     lv_obj_align(s_time_label, LV_ALIGN_CENTER, 0, 3);
 
-    s_outline_top = timer_outline_segment_create(s_time_panel);
-    s_outline_right = timer_outline_segment_create(s_time_panel);
-    s_outline_bottom = timer_outline_segment_create(s_time_panel);
-    s_outline_left = timer_outline_segment_create(s_time_panel);
-
     timer_picker_create(s_top_row);
     timer_history_create(s_top_row);
-
-    lv_obj_t *middle_spacer = lv_obj_create(main_page);
-    lv_obj_remove_style_all(middle_spacer);
-    lv_obj_set_size(middle_spacer, LV_PCT(100), 1);
-    lv_obj_set_flex_grow(middle_spacer, 1);
-    lv_obj_clear_flag(middle_spacer, LV_OBJ_FLAG_SCROLLABLE);
 
     s_preset_row = lv_obj_create(main_page);
     lv_obj_remove_style_all(s_preset_row);
     lv_obj_set_size(s_preset_row, LV_PCT(100), TIMER_PRESET_BTN_H);
     lv_obj_set_flex_flow(s_preset_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(s_preset_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(s_preset_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(s_preset_row, TIMER_CONTROL_GAP, LV_PART_MAIN);
     lv_obj_clear_flag(s_preset_row, LV_OBJ_FLAG_SCROLLABLE);
 
     quick_preset_create(s_preset_row, 0);
@@ -1632,10 +1802,10 @@ lv_obj_t *screen_timer_create(lv_obj_t *parent)
 
     lv_obj_t *action_row = lv_obj_create(main_page);
     lv_obj_remove_style_all(action_row);
-    lv_obj_set_size(action_row, LV_PCT(100), TIMER_ACTION_BTN_H);
+    lv_obj_set_size(action_row, LV_PCT(100), TIMER_ACTION_ROW_H);
     lv_obj_set_flex_flow(action_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(action_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(action_row, TIMER_ACTION_GAP, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(action_row, TIMER_CONTROL_GAP, LV_PART_MAIN);
     lv_obj_clear_flag(action_row, LV_OBJ_FLAG_SCROLLABLE);
 
     s_start_btn = lv_button_create(action_row);
@@ -1661,7 +1831,7 @@ lv_obj_t *screen_timer_create(lv_obj_t *parent)
     lv_obj_add_flag(s_repeat_btn, LV_OBJ_FLAG_HIDDEN);
 
     s_snooze_btn = lv_button_create(action_row);
-    lv_obj_set_size(s_snooze_btn, 214, TIMER_ACTION_BTN_H);
+    lv_obj_set_size(s_snooze_btn, TIMER_SNOOZE_BTN_W, TIMER_ACTION_BTN_H);
     theme_btn_style_secondary(s_snooze_btn);
     lv_obj_set_style_radius(s_snooze_btn, 16, LV_PART_MAIN);
     s_snooze_btn_label = lv_label_create(s_snooze_btn);

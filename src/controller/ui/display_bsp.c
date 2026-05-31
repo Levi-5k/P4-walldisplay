@@ -22,7 +22,11 @@ esp_err_t display_bsp_init(void)
     bsp_display_cfg_t cfg = {
         .lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
         .buffer_size   = FAST_DRAW_BUFFER_PIXELS,
-        .double_buffer = BSP_LCD_DRAW_BUFF_DOUBLE,
+        /* Double draw buffer: LVGL renders the next region into one buffer while
+         * the previous is flushed to the DSI frame buffer, overlapping draw and
+         * copy for smoother updates. Two FAST_DRAW_BUFFER_PIXELS RGB565 buffers
+         * (~112 KB each) live in PSRAM. */
+        .double_buffer = true,
         .flags = {
             .buff_dma    = true,
             .buff_spiram = true,

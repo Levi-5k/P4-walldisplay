@@ -6,6 +6,7 @@
 static lv_obj_t *s_pages[NAV_BUTTON_COUNT];
 static int       s_page_count;
 static lv_obj_t *s_buttons[NAV_BUTTON_COUNT];
+static lv_obj_t *s_button_pages[NAV_BUTTON_COUNT];
 static nav_page_shown_cb_t s_page_shown_cb;
 static void *s_page_shown_user_data;
 
@@ -48,6 +49,12 @@ static void nav_btn_cb(lv_event_t *e)
 void nav_bar_show_page(lv_obj_t *page)
 {
     show_only(page);
+    for (int i = 0; i < NAV_BUTTON_COUNT; i++) {
+        if (s_button_pages[i] == page) {
+            highlight_button(s_buttons[i]);
+            break;
+        }
+    }
     notify_page_shown(page);
 }
 
@@ -86,6 +93,7 @@ lv_obj_t *nav_bar_create(lv_obj_t *parent, const nav_pages_t *pages)
 {
     s_page_shown_cb = pages->page_shown_cb;
     s_page_shown_user_data = pages->page_shown_user_data;
+    for (int i = 0; i < NAV_BUTTON_COUNT; i++) s_button_pages[i] = NULL;
 
     s_page_count = 0;
     if (pages->lights_page)   s_pages[s_page_count++] = pages->lights_page;
@@ -108,6 +116,10 @@ lv_obj_t *nav_bar_create(lv_obj_t *parent, const nav_pages_t *pages)
     s_buttons[1] = icon_btn(bar, LV_SYMBOL_REFRESH,  "Weather",  pages->weather_page);
     s_buttons[2] = icon_btn(bar, LV_SYMBOL_PLAY,     "Timer",    pages->timer_page);
     s_buttons[3] = icon_btn(bar, LV_SYMBOL_SETTINGS, "Settings", pages->settings_page);
+    s_button_pages[0] = pages->lights_page;
+    s_button_pages[1] = pages->weather_page;
+    s_button_pages[2] = pages->timer_page;
+    s_button_pages[3] = pages->settings_page;
 
     if (pages->lights_page) {
         show_only(pages->lights_page);

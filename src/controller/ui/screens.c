@@ -266,31 +266,6 @@ static void arc_color_set_if_changed(lv_obj_t *obj, lv_part_t part, lv_color_t c
     }
 }
 
-static void shadow_set_if_changed(lv_obj_t *obj, int32_t width, lv_color_t color, lv_opa_t opa)
-{
-    if (!obj) return;
-    if (lv_obj_get_style_shadow_width(obj, LV_PART_MAIN) != width) {
-        lv_obj_set_style_shadow_width(obj, width, LV_PART_MAIN);
-    }
-    if (!lv_color_eq(lv_obj_get_style_shadow_color(obj, LV_PART_MAIN), color)) {
-        lv_obj_set_style_shadow_color(obj, color, LV_PART_MAIN);
-    }
-    if (lv_obj_get_style_shadow_opa(obj, LV_PART_MAIN) != opa) {
-        lv_obj_set_style_shadow_opa(obj, opa, LV_PART_MAIN);
-    }
-}
-
-static void shadow_offset_set_if_changed(lv_obj_t *obj, int32_t x, int32_t y)
-{
-    if (!obj) return;
-    if (lv_obj_get_style_shadow_offset_x(obj, LV_PART_MAIN) != x) {
-        lv_obj_set_style_shadow_offset_x(obj, x, LV_PART_MAIN);
-    }
-    if (lv_obj_get_style_shadow_offset_y(obj, LV_PART_MAIN) != y) {
-        lv_obj_set_style_shadow_offset_y(obj, y, LV_PART_MAIN);
-    }
-}
-
 /* ============================================================
  * LIGHTS PAGE
  * ============================================================ */
@@ -322,7 +297,6 @@ static lv_obj_t *s_effect_param_sliders[WLED_EFFECT_PARAM_COUNT];
 static lv_obj_t *s_effect_param_value_labels[WLED_EFFECT_PARAM_COUNT];
 static lv_obj_t *s_preset_btns[LIGHTS_PRESET_COUNT];
 static lv_obj_t *s_lights_root;
-static lv_timer_t *s_lights_anim_timer;
 static lv_obj_t *s_lights_home_page;
 static lv_obj_t *s_lights_effects_page;
 static lv_obj_t *s_lights_presets_page;
@@ -1003,54 +977,6 @@ static void effect_param_row_create(lv_obj_t *parent, size_t index, lv_color_t c
     s_effect_param_value_labels[index] = value;
 }
 
-static void lights_anim_cb(lv_timer_t *t)
-{
-    if (timer_page_hidden(t, s_lights_root)) return;
-
-    static uint32_t ms_count = 0;
-    ms_count += 40;
-
-    led_state_t s;
-    led_state_get(&s);
-
-    if (s.power) {
-        /* Premium deep sine wave breathing pulse when light is ON (2.0s period) */
-        float freq = (float)ms_count * 0.00314f;
-        float sin_val = (sinf(freq) + 1.0f) * 0.5f;
-
-        int32_t arc_shadow = 14 + (int32_t)(22.0f * sin_val);
-        int32_t btn_shadow = 12 + (int32_t)(16.0f * sin_val);
-        lv_opa_t arc_opa = (lv_opa_t)(LV_OPA_20 + (int32_t)(40.0f * sin_val));
-        lv_opa_t btn_opa = (lv_opa_t)(LV_OPA_40 + (int32_t)(35.0f * sin_val));
-
-        if (s_kel_arc) {
-            lv_color_t glow_color = kelvin_to_color(s.kelvin);
-            shadow_set_if_changed(s_kel_arc, arc_shadow, glow_color, arc_opa);
-        }
-
-        if (s_power_btn) {
-            shadow_offset_set_if_changed(s_power_btn, 0, 6);
-            shadow_set_if_changed(s_power_btn, btn_shadow, theme_primary_color(), btn_opa);
-        }
-    } else {
-        /* Calming, ultra-slow resting breathe when light is OFF (4.0s period) */
-        float freq = (float)ms_count * 0.00157f;
-        float sin_val = (sinf(freq) + 1.0f) * 0.5f;
-
-        int32_t arc_shadow = 4 + (int32_t)(6.0f * sin_val);
-        int32_t btn_shadow = 8 + (int32_t)(4.0f * sin_val);
-
-        if (s_kel_arc) {
-            shadow_set_if_changed(s_kel_arc, arc_shadow, theme_border_color(), LV_OPA_10);
-        }
-
-        if (s_power_btn) {
-            shadow_offset_set_if_changed(s_power_btn, 0, 4);
-            shadow_set_if_changed(s_power_btn, btn_shadow, lv_color_black(), LV_OPA_50);
-        }
-    }
-}
-
 lv_obj_t *screen_lights_create(lv_obj_t *parent)
 {
     lights_tuning_refresh();
@@ -1590,7 +1516,6 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
     lights_status_refresh(NULL);
     lv_timer_create(lights_sync_refresh, 150, NULL);
     lv_timer_create(lights_status_refresh, 1500, NULL);
-    s_lights_anim_timer = lv_timer_create(lights_anim_cb, 40, NULL);
     lights_show_panel(s_lights_home_page);
 
     return p;
@@ -1621,6 +1546,8 @@ static lv_obj_t *s_wx_dewpoint;
 static lv_obj_t *s_wx_daylight;
 static lv_obj_t *s_wx_city;
 static lv_obj_t *s_wx_observed;
+static lv_obj_t *s_wx_moon_icon;
+static lv_obj_t *s_wx_moon_label;
 static lv_obj_t *s_wx_wind_compass;
 static lv_obj_t *s_wx_wind_degree;
 static lv_obj_t *s_wx_wind_needle;
@@ -1693,6 +1620,64 @@ static const char *weather_symbol(const char *condition, const char *icon_code, 
     if (strstr(condition, "Cloud"))     return is_night ? WI_NIGHT_CLOUDY  : WI_DAY_CLOUDY;
     if (strstr(condition, "Clear"))     return is_night ? WI_NIGHT_CLEAR   : WI_DAY_SUNNY;
     return WI_NA;
+}
+
+static bool moon_phase_info(const weather_state_t *w, const char **icon, const char **label,
+                            const char **compact_label)
+{
+    static const char *icons[28] = {
+        WI_MOON_NEW,
+        WI_MOON_WAXING_CRESCENT_1, WI_MOON_WAXING_CRESCENT_2, WI_MOON_WAXING_CRESCENT_3,
+        WI_MOON_WAXING_CRESCENT_4, WI_MOON_WAXING_CRESCENT_5, WI_MOON_WAXING_CRESCENT_6,
+        WI_MOON_FIRST_QUARTER,
+        WI_MOON_WAXING_GIBBOUS_1, WI_MOON_WAXING_GIBBOUS_2, WI_MOON_WAXING_GIBBOUS_3,
+        WI_MOON_WAXING_GIBBOUS_4, WI_MOON_WAXING_GIBBOUS_5, WI_MOON_WAXING_GIBBOUS_6,
+        WI_MOON_FULL,
+        WI_MOON_WANING_GIBBOUS_1, WI_MOON_WANING_GIBBOUS_2, WI_MOON_WANING_GIBBOUS_3,
+        WI_MOON_WANING_GIBBOUS_4, WI_MOON_WANING_GIBBOUS_5, WI_MOON_WANING_GIBBOUS_6,
+        WI_MOON_THIRD_QUARTER,
+        WI_MOON_WANING_CRESCENT_1, WI_MOON_WANING_CRESCENT_2, WI_MOON_WANING_CRESCENT_3,
+        WI_MOON_WANING_CRESCENT_4, WI_MOON_WANING_CRESCENT_5, WI_MOON_WANING_CRESCENT_6,
+    };
+    static const char *labels[8] = {
+        "New moon", "Waxing crescent", "First quarter", "Waxing gibbous",
+        "Full moon", "Waning gibbous", "Third quarter", "Waning crescent",
+    };
+    static const char *compact_labels[8] = {
+        "New moon", "Waxing", "First quarter", "Waxing",
+        "Full moon", "Waning", "Third quarter", "Waning",
+    };
+
+    uint32_t utc = w && w->observed_utc ? w->observed_utc : (uint32_t)time(NULL);
+    if (utc < 1704067200u) return false;
+
+    const double synodic_month_days = 29.530588853;
+    const double reference_new_moon_utc = 947182440.0;
+    double age_days = fmod((((double)utc - reference_new_moon_utc) / 86400.0), synodic_month_days);
+    if (age_days < 0.0) age_days += synodic_month_days;
+    double fraction = age_days / synodic_month_days;
+    uint8_t icon_index = (uint8_t)floor((fraction * 28.0) + 0.5);
+    uint8_t label_index = (uint8_t)floor((fraction * 8.0) + 0.5);
+    if (icon_index >= 28) icon_index = 0;
+    label_index &= 7;
+
+    if (icon) *icon = icons[icon_index];
+    if (label) *label = labels[label_index];
+    if (compact_label) *compact_label = compact_labels[label_index];
+    return true;
+}
+
+static void moon_phase_labels_set(lv_obj_t *icon_obj, lv_obj_t *label_obj,
+                                  const weather_state_t *w, bool compact)
+{
+    const char *icon = WI_NA;
+    const char *label = "Moon —";
+    const char *compact_label = label;
+    if (moon_phase_info(w, &icon, &label, &compact_label)) {
+        label = compact ? compact_label : label;
+    }
+    label_set_text_if_changed(icon_obj, icon);
+    label_set_text_if_changed(label_obj, label);
 }
 
 /* Is the current wall-clock time after sunset / before sunrise? */
@@ -1885,6 +1870,7 @@ static void weather_refresh(lv_timer_t *t)
         label_set_text_if_changed(s_wx_daylight, "—");
         label_set_text_if_changed(s_wx_city, "");
         label_set_text_if_changed(s_wx_observed, "");
+        moon_phase_labels_set(s_wx_moon_icon, s_wx_moon_label, NULL, false);
         label_set_text_if_changed(s_wx_age, "Waiting for first fetch...");
         wx_wind_visual_set(NULL);
         for (int i = 0; i < WX_FORECAST_SLOTS; i++) {
@@ -1979,6 +1965,7 @@ static void weather_refresh(lv_timer_t *t)
         snprintf(b, sizeof(b), LV_SYMBOL_REFRESH " %s", hm);
     } else b[0] = '\0';
     label_set_text_if_changed(s_wx_observed, b);
+    moon_phase_labels_set(s_wx_moon_icon, s_wx_moon_label, &w, false);
 
     /* Forecast row */
     for (int i = 0; i < WX_FORECAST_SLOTS; i++) {
@@ -2150,11 +2137,37 @@ lv_obj_t *screen_weather_create(lv_obj_t *parent)
 
     s_wx_city = lv_label_create(header);
     lv_label_set_text(s_wx_city, "");
+    lv_obj_set_width(s_wx_city, 1);
+    lv_obj_set_flex_grow(s_wx_city, 1);
+    lv_label_set_long_mode(s_wx_city, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_color(s_wx_city, THEME_TEXT_PRIMARY, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_wx_city, THEME_FONT_TITLE, LV_PART_MAIN);
 
-    s_wx_observed = lv_label_create(header);
+    lv_obj_t *header_meta = lv_obj_create(header);
+    lv_obj_remove_style_all(header_meta);
+    lv_obj_set_size(header_meta, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(header_meta, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(header_meta, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(header_meta, 10, LV_PART_MAIN);
+    lv_obj_clear_flag(header_meta, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_wx_moon_icon = lv_label_create(header_meta);
+    lv_label_set_text(s_wx_moon_icon, WI_NA);
+    lv_obj_set_style_text_color(s_wx_moon_icon, lv_color_hex(0xD9E2FF), LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_wx_moon_icon, THEME_FONT_WX_MEDIUM, LV_PART_MAIN);
+
+    s_wx_moon_label = lv_label_create(header_meta);
+    lv_label_set_text(s_wx_moon_label, "Moon —");
+    lv_obj_set_width(s_wx_moon_label, 170);
+    lv_label_set_long_mode(s_wx_moon_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(s_wx_moon_label, THEME_TEXT_SECONDARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_wx_moon_label, THEME_FONT_BODY, LV_PART_MAIN);
+
+    s_wx_observed = lv_label_create(header_meta);
     lv_label_set_text(s_wx_observed, "");
+    lv_obj_set_width(s_wx_observed, 104);
+    lv_label_set_long_mode(s_wx_observed, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(s_wx_observed, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_wx_observed, THEME_TEXT_MUTED, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_wx_observed, THEME_FONT_LABEL, LV_PART_MAIN);
 
@@ -2849,6 +2862,8 @@ static stepper_ctx_t *add_stepper_row(lv_obj_t *parent, const char *icon,
 static lv_obj_t *s_settings_keyboard;
 static lv_obj_t *s_settings_root;
 static lv_obj_t *s_settings_home;
+static lv_obj_t *s_settings_floating_header;
+static lv_obj_t *s_settings_floating_title;
 static lv_obj_t *s_settings_lights_page;
 static lv_obj_t *s_settings_wifi_page;
 static lv_obj_t *s_settings_wled_page;
@@ -3014,6 +3029,16 @@ static void settings_show_panel(lv_obj_t *panel)
         if (panels[i] == panel) lv_obj_clear_flag(panels[i], LV_OBJ_FLAG_HIDDEN);
         else lv_obj_add_flag(panels[i], LV_OBJ_FLAG_HIDDEN);
     }
+    if (s_settings_floating_header) {
+        if (panel && panel != s_settings_home) {
+            const char *title = (const char *)lv_obj_get_user_data(panel);
+            label_set_text_if_changed(s_settings_floating_title, title && title[0] ? title : "Settings");
+            lv_obj_clear_flag(s_settings_floating_header, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(s_settings_floating_header);
+        } else {
+            lv_obj_add_flag(s_settings_floating_header, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
     if (s_settings_root) lv_obj_scroll_to_y(s_settings_root, 0, LV_ANIM_OFF);
 }
 
@@ -3023,17 +3048,23 @@ static void settings_back_clicked(lv_event_t *e)
     settings_show_panel(s_settings_home);
 }
 
-static lv_obj_t *settings_header(lv_obj_t *parent, const char *title)
+static void settings_floating_header_create(lv_obj_t *parent)
 {
-    lv_obj_t *row = lv_obj_create(parent);
-    lv_obj_remove_style_all(row);
-    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(row, 12, LV_PART_MAIN);
-    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    s_settings_floating_header = lv_obj_create(parent);
+    lv_obj_remove_style_all(s_settings_floating_header);
+    theme_style_glass_panel(s_settings_floating_header, 18);
+    lv_obj_set_size(s_settings_floating_header, LV_PCT(100), 72);
+    lv_obj_set_style_pad_hor(s_settings_floating_header, 10, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(s_settings_floating_header, 8, LV_PART_MAIN);
+    lv_obj_set_flex_flow(s_settings_floating_header, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_settings_floating_header, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(s_settings_floating_header, 12, LV_PART_MAIN);
+    lv_obj_add_flag(s_settings_floating_header, LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_settings_floating_header, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(s_settings_floating_header, LV_ALIGN_TOP_MID, 0, 0);
 
-    lv_obj_t *back = lv_button_create(row);
+    lv_obj_t *back = lv_button_create(s_settings_floating_header);
     lv_obj_set_size(back, 54, 54);
     lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(back, 0, LV_PART_MAIN);
@@ -3044,17 +3075,28 @@ static lv_obj_t *settings_header(lv_obj_t *parent, const char *title)
     lv_obj_add_event_cb(back, settings_back_clicked, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *arrow = lv_label_create(back);
-    lv_label_set_text(arrow, "<");
+    lv_label_set_text(arrow, LV_SYMBOL_LEFT);
     lv_obj_set_style_text_font(arrow, THEME_FONT_TITLE, LV_PART_MAIN);
     lv_obj_set_style_text_color(arrow, THEME_TEXT_PRIMARY, LV_PART_MAIN);
     lv_obj_center(arrow);
 
-    lv_obj_t *label = lv_label_create(row);
-    lv_label_set_text(label, title);
-    lv_obj_set_style_text_color(label, THEME_TEXT_PRIMARY, LV_PART_MAIN);
-    lv_obj_set_style_text_font(label, THEME_FONT_TITLE, LV_PART_MAIN);
-    lv_obj_set_flex_grow(label, 1);
-    return row;
+    s_settings_floating_title = lv_label_create(s_settings_floating_header);
+    lv_label_set_text(s_settings_floating_title, "Settings");
+    lv_obj_set_width(s_settings_floating_title, 1);
+    lv_obj_set_flex_grow(s_settings_floating_title, 1);
+    lv_label_set_long_mode(s_settings_floating_title, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(s_settings_floating_title, THEME_TEXT_PRIMARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_settings_floating_title, THEME_FONT_TITLE, LV_PART_MAIN);
+}
+
+static lv_obj_t *settings_header(lv_obj_t *parent, const char *title)
+{
+    lv_obj_set_user_data(parent, (void *)title);
+    lv_obj_t *spacer = lv_obj_create(parent);
+    lv_obj_remove_style_all(spacer);
+    lv_obj_set_size(spacer, LV_PCT(100), 74);
+    lv_obj_clear_flag(spacer, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    return spacer;
 }
 
 static lv_obj_t *settings_section_title(lv_obj_t *parent, const char *title)
@@ -4822,6 +4864,8 @@ static void theme_update_swatches(theme_color_role_t role)
         lv_obj_t *swatch = s_theme_swatches[role][i];
         if (!swatch) continue;
         bool selected = i == s_theme_selected[role];
+        lv_obj_set_style_bg_color(swatch, lv_color_hex(s_theme_color_roles[role].choices[i]), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(swatch, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_border_width(swatch, selected ? 4 : 1, LV_PART_MAIN);
         lv_obj_set_style_border_color(swatch, selected ? THEME_TEXT_PRIMARY : THEME_BORDER_COLOR, LV_PART_MAIN);
     }
@@ -4858,6 +4902,11 @@ static void theme_collect_controls(app_theme_config_t *cfg)
     snprintf(cfg->background_url, sizeof(cfg->background_url), "%s", url ? url : "");
 }
 
+/* Re-sync the cached idle lv_screen to the current theme/opacity. It is never
+ * the active screen while Settings is open, so the lv_screen_active() refresh
+ * in these handlers misses it. Defined with the idle screen further down. */
+static void idle_apply_theme(void);
+
 static void theme_preview_apply(void)
 {
     app_theme_config_t cfg;
@@ -4865,6 +4914,7 @@ static void theme_preview_apply(void)
     theme_apply_config(&cfg);
     theme_recolor_tree(lv_screen_active());
     theme_apply_surface_opacity(lv_screen_active());
+    idle_apply_theme();
     theme_update_all_swatches();
 }
 
@@ -5076,6 +5126,8 @@ static esp_err_t theme_save_controls(bool refresh_background)
         theme_apply_config(&cfg);
         theme_recolor_tree(lv_screen_active());
         theme_apply_surface_opacity(lv_screen_active());
+        idle_apply_theme();
+        theme_update_all_swatches();
         if (refresh_background) ui_background_refresh();
     }
     return err;
@@ -5101,6 +5153,8 @@ static void theme_clear_clicked(lv_event_t *e)
     theme_apply_config(&cfg);
     theme_recolor_tree(lv_screen_active());
     theme_apply_surface_opacity(lv_screen_active());
+    idle_apply_theme();
+    theme_update_all_swatches();
     toast_show(err == ESP_OK ? "Theme cleared" : esp_err_to_name(err));
     settings_status_refresh(NULL);
 }
@@ -5394,6 +5448,7 @@ lv_obj_t *screen_settings_create(lv_obj_t *parent)
 {
     lv_obj_t *p = page_root(parent);
     s_settings_root = p;
+    settings_floating_header_create(p);
 
     s_settings_home = settings_panel_create(p);
     s_settings_lights_page = settings_panel_create(p);
@@ -5907,10 +5962,15 @@ static lv_obj_t *s_idle_extra;      /* Humidity / wind / etc. summary line */
 static lv_obj_t *s_idle_icon;       /* Top-left weather symbol */
 static lv_obj_t *s_idle_feels;      /* "Feels Like 98°" */
 static lv_obj_t *s_idle_hilo;       /* "Hi 83°  Lo 64°" line under temp */
+static lv_obj_t *s_idle_moon_icon;
+static lv_obj_t *s_idle_moon_label;
 static lv_obj_t *s_idle_screen;
 
 /* Forecast strip handles (5 slots: day name, icon, hi/lo). */
 #define IDLE_FORECAST_SLOTS 5
+#define IDLE_TOP_PAD_X 12
+#define IDLE_WEATHER_W 272
+#define IDLE_CLOCK_W 404
 static lv_obj_t *s_idle_fc_day[IDLE_FORECAST_SLOTS];
 static lv_obj_t *s_idle_fc_icon[IDLE_FORECAST_SLOTS];
 static lv_obj_t *s_idle_fc_temp[IDLE_FORECAST_SLOTS];
@@ -5926,6 +5986,17 @@ static lv_obj_t *s_idle_m_clouds;
 static lv_obj_t *s_idle_m_visibility;
 static lv_obj_t *s_idle_m_gust;
 static lv_obj_t *s_idle_m_precip;
+
+/* The idle screen is a separate, cached lv_screen, so the theme/opacity refresh
+ * that runs on lv_screen_active() (the main UI) never reaches it. Re-sync it
+ * here — called from the theme settings handlers — so its glass panels honor
+ * the surface-opacity (transparency) setting like the main screen's do. */
+static void idle_apply_theme(void)
+{
+    if (!s_idle_screen) return;
+    theme_recolor_tree(s_idle_screen);
+    theme_apply_surface_opacity(s_idle_screen);
+}
 
 static void idle_set_digit(lv_obj_t *label, int digit)
 {
@@ -6012,6 +6083,7 @@ static void idle_weather_tick_cb(lv_timer_t *t)
             else b[0] = '\0';
             label_set_text_if_changed(s_idle_extra, b);
         }
+        moon_phase_labels_set(s_idle_moon_icon, s_idle_moon_label, &w, true);
 
         /* Forecast strip */
         for (int i = 0; i < IDLE_FORECAST_SLOTS; i++) {
@@ -6082,6 +6154,7 @@ static void idle_weather_tick_cb(lv_timer_t *t)
         label_set_text_if_changed(s_idle_cond, "Weather unavailable");
         label_set_text_if_changed(s_idle_icon, WI_NA);
         label_set_text_if_changed(s_idle_extra, "Tap screen to wake");
+        moon_phase_labels_set(s_idle_moon_icon, s_idle_moon_label, NULL, true);
         for (int i = 0; i < IDLE_FORECAST_SLOTS; i++) {
             label_set_text_if_changed(s_idle_fc_day[i], "---");
             label_set_text_if_changed(s_idle_fc_icon[i], WI_NA);
@@ -6249,7 +6322,7 @@ lv_obj_t *screen_idle_create(void)
     lv_obj_t *top = lv_obj_create(scr);
     theme_style_glass_panel(top, 14);
     lv_obj_set_size(top, LV_PCT(100), 268);
-    lv_obj_set_style_pad_hor(top, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(top, IDLE_TOP_PAD_X, LV_PART_MAIN);
     lv_obj_set_style_pad_ver(top, 10, LV_PART_MAIN);
     lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(top, LV_FLEX_ALIGN_SPACE_BETWEEN,
@@ -6258,33 +6331,33 @@ lv_obj_t *screen_idle_create(void)
 
     /* ---- Clock column (right) ---- */
     lv_obj_t *clock_col = idle_clean_obj(top);
-    lv_obj_set_size(clock_col, 414, LV_PCT(100));
+    lv_obj_set_size(clock_col, IDLE_CLOCK_W, LV_PCT(100));
     lv_obj_set_flex_flow(clock_col, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(clock_col, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(clock_col, 0, LV_PART_MAIN);
 
     s_idle_date = lv_label_create(clock_col);
     lv_label_set_text(s_idle_date, "");
-    lv_obj_set_width(s_idle_date, 414);
+    lv_obj_set_width(s_idle_date, IDLE_CLOCK_W);
     lv_label_set_long_mode(s_idle_date, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_align(s_idle_date, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_text_align(s_idle_date, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_idle_date, THEME_FONT_XLARGE, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_idle_date, THEME_TEXT_SECONDARY, LV_PART_MAIN);
 
     s_idle_extra = lv_label_create(clock_col);
     lv_label_set_text(s_idle_extra, "");
-    lv_obj_set_width(s_idle_extra, 414);
+    lv_obj_set_width(s_idle_extra, IDLE_CLOCK_W);
     lv_label_set_long_mode(s_idle_extra, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_align(s_idle_extra, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_text_align(s_idle_extra, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_idle_extra, THEME_FONT_BODY, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_idle_extra, THEME_TEXT_MUTED, LV_PART_MAIN);
 
     /* HH:MM row (fixed digit cells + seconds/AM-PM stack). */
     lv_obj_t *time_row = idle_clean_obj(clock_col);
-    lv_obj_set_size(time_row, 414, 166);
+    lv_obj_set_size(time_row, IDLE_CLOCK_W, 166);
     lv_obj_set_flex_flow(time_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(time_row, LV_FLEX_ALIGN_END,
+    lv_obj_set_flex_align(time_row, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(time_row, 1, LV_PART_MAIN);
 
@@ -6331,18 +6404,18 @@ lv_obj_t *screen_idle_create(void)
 
     /* ---- Current weather column (left) ---- */
     lv_obj_t *wx_col = idle_clean_obj(top);
-    lv_obj_set_size(wx_col, 286, LV_PCT(100));
+    lv_obj_set_size(wx_col, IDLE_WEATHER_W, LV_PCT(100));
     lv_obj_set_flex_flow(wx_col, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(wx_col, LV_FLEX_ALIGN_START,
-                          LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(wx_col, 2, LV_PART_MAIN);
     lv_obj_move_to_index(wx_col, 0);
 
     /* Icon + temp side by side */
     lv_obj_t *wx_row = idle_clean_obj(wx_col);
-    lv_obj_set_size(wx_row, 286, 142);
+    lv_obj_set_size(wx_row, IDLE_WEATHER_W, 142);
     lv_obj_set_flex_flow(wx_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(wx_row, LV_FLEX_ALIGN_START,
+    lv_obj_set_flex_align(wx_row, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(wx_row, 4, LV_PART_MAIN);
 
@@ -6358,21 +6431,46 @@ lv_obj_t *screen_idle_create(void)
 
     s_idle_feels = lv_label_create(wx_col);
     lv_label_set_text(s_idle_feels, "Feels like —°");
+    lv_obj_set_width(s_idle_feels, IDLE_WEATHER_W);
+    lv_label_set_long_mode(s_idle_feels, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(s_idle_feels, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_idle_feels, THEME_FONT_TITLE, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_idle_feels, THEME_TEXT_SECONDARY, LV_PART_MAIN);
 
     s_idle_cond = lv_label_create(wx_col);
     lv_label_set_text(s_idle_cond, "Weather unavailable");
-    lv_obj_set_width(s_idle_cond, 286);
+    lv_obj_set_width(s_idle_cond, IDLE_WEATHER_W);
     lv_label_set_long_mode(s_idle_cond, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_align(s_idle_cond, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+    lv_obj_set_style_text_align(s_idle_cond, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_idle_cond, THEME_FONT_BODY, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_idle_cond, THEME_TEXT_MUTED, LV_PART_MAIN);
 
     s_idle_hilo = lv_label_create(wx_col);
     lv_label_set_text(s_idle_hilo, "Hi —   Lo —");
+    lv_obj_set_width(s_idle_hilo, IDLE_WEATHER_W);
+    lv_label_set_long_mode(s_idle_hilo, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(s_idle_hilo, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_idle_hilo, THEME_FONT_BODY, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_idle_hilo, THEME_TEXT_MUTED, LV_PART_MAIN);
+
+    lv_obj_t *moon_row = idle_clean_obj(wx_col);
+    lv_obj_set_size(moon_row, IDLE_WEATHER_W, 30);
+    lv_obj_set_flex_flow(moon_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(moon_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(moon_row, 8, LV_PART_MAIN);
+
+    s_idle_moon_icon = lv_label_create(moon_row);
+    lv_label_set_text(s_idle_moon_icon, WI_NA);
+    lv_obj_set_style_text_font(s_idle_moon_icon, THEME_FONT_WX_SMALL, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_idle_moon_icon, lv_color_hex(0xD9E2FF), LV_PART_MAIN);
+
+    s_idle_moon_label = lv_label_create(moon_row);
+    lv_label_set_text(s_idle_moon_label, "Moon —");
+    lv_obj_set_width(s_idle_moon_label, 220);
+    lv_label_set_long_mode(s_idle_moon_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(s_idle_moon_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_idle_moon_label, THEME_FONT_LABEL, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_idle_moon_label, THEME_TEXT_MUTED, LV_PART_MAIN);
 
     /* ===== 5-day forecast row ===== */
     lv_obj_t *fc_row = lv_obj_create(scr);

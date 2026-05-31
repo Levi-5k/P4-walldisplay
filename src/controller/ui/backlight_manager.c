@@ -156,11 +156,10 @@ static void ramp_cb(lv_timer_t *t)
     (void)t;
     if (s_current_pct == s_target_pct) return;
 
-    if (s_current_pct < s_target_pct) {
-        s_current_pct++;
-    } else {
-        s_current_pct--;
-    }
+    /* The Waveshare BSP logs and applies each PWM duty update immediately.
+     * A 1%-per-tick ramp causes visible panel flashing on this board, so
+     * apply auto-brightness target changes atomically. */
+    s_current_pct = s_target_pct;
     backlight_set(s_current_pct);
 }
 

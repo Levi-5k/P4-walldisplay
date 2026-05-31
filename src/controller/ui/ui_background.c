@@ -45,6 +45,9 @@
 #define BG_PROGRESS_STEP_BYTES (48u * 1024u)
 #define BG_TASK_STACK      16384
 #define BG_HTTP_TIMEOUT_MS 20000
+#define BG_BOOT_REFRESH_PERIOD_MS 2500
+#define BG_BOOT_REFRESH_MIN_ATTEMPTS 8
+#define BG_BOOT_REFRESH_MAX_ATTEMPTS 24
 /* Bump this when the JPEG converter changes in a way that invalidates
  * previously-converted files (e.g. the v1 pixel-domain converter produced
  * corrupted output; v2 is the lossless transcoder).  On mismatch the
@@ -167,6 +170,8 @@ typedef struct {
 static bg_screen_t s_screens[BG_MAX_SCREENS];
 static uint8_t s_screen_count;
 static lv_timer_t *s_timer;
+static lv_timer_t *s_boot_refresh_timer;
+static uint8_t s_boot_refresh_attempts;
 static uint8_t s_active_slot;
 
 /* Raw RGB565 image loaded from SD for LVGL display */
@@ -325,6 +330,72 @@ static bool find_existing_slot(const app_theme_config_t *cfg, uint8_t start, uin
 }
 
 static void apply_background(void);
+static void schedule_boot_background_refresh(void);
+
+static bool detail_is_inflight(const char *detail)
+{
+    return detail && (!strncmp(detail, "Fetching", 8) || !strcmp(detail, "Weather queued"));
+}
+
+static bool background_config_wants_image(app_theme_config_t *out)
+{
+    app_theme_config_t cfg;
+    if (app_config_theme_load(&cfg) != ESP_OK) app_config_theme_defaults(&cfg);
+    if (out) *out = cfg;
+    return cfg.background_enabled && cfg.image_count > 0;
+}
+
+static bool boot_background_refresh_ready(bool forced)
+{
+    if (services_network_bulk_active()) return false;
+    if (sd_storage_is_network_busy()) return false;
+
+    services_status_t st;
+    if (services_status_get(&st) != ESP_OK) return forced;
+    if (!forced && st.wifi_configured && !st.wifi_connected) return false;
+    if (!forced && st.weather_configured && detail_is_inflight(st.weather_detail)) return false;
+    return true;
+}
+
+static void boot_background_refresh_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (s_sd_background_allowed) {
+        lv_timer_delete(s_boot_refresh_timer);
+        s_boot_refresh_timer = NULL;
+        return;
+    }
+
+    app_theme_config_t cfg;
+    if (!background_config_wants_image(&cfg)) {
+        lv_timer_delete(s_boot_refresh_timer);
+        s_boot_refresh_timer = NULL;
+        return;
+    }
+
+    if (s_boot_refresh_attempts < UINT8_MAX) s_boot_refresh_attempts++;
+    bool forced = s_boot_refresh_attempts >= BG_BOOT_REFRESH_MAX_ATTEMPTS;
+    if (s_boot_refresh_attempts < BG_BOOT_REFRESH_MIN_ATTEMPTS && !forced) return;
+    if (!boot_background_refresh_ready(forced)) return;
+
+    ESP_LOGI(TAG, "boot background refresh applying preset %u after %u attempts%s",
+             (unsigned)cfg.background_preset,
+             (unsigned)s_boot_refresh_attempts,
+             forced ? " (forced)" : "");
+    lv_timer_delete(s_boot_refresh_timer);
+    s_boot_refresh_timer = NULL;
+    ui_background_refresh();
+}
+
+static void schedule_boot_background_refresh(void)
+{
+    if (s_boot_refresh_timer || s_sd_background_allowed) return;
+    if (!background_config_wants_image(NULL)) return;
+    s_boot_refresh_attempts = 0;
+    s_boot_refresh_timer = lv_timer_create(boot_background_refresh_cb,
+                                           BG_BOOT_REFRESH_PERIOD_MS,
+                                           NULL);
+}
 
 /**
  * Forcibly release all SD-backed background images from LVGL.
@@ -443,12 +514,23 @@ static void apply_background(void)
         ESP_LOGE(TAG, "apply_background: OOM for %ux%u pixels", pad_w, pad_h);
         return;
     }
-    size_t got = fread(new_pixels, 1, pixel_bytes, rf);
-    fclose(rf);
-    if (got != pixel_bytes) {
-        free(new_pixels);
-        ESP_LOGE(TAG, "apply_background: short read %u/%u", (unsigned)got, (unsigned)pixel_bytes);
-        return;
+    /* Read in chunks with yields so SDMMC slot 0 doesn't starve slot 1 */
+    {
+        size_t off = 0;
+        bool read_ok = true;
+        while (off < pixel_bytes) {
+            size_t chunk = pixel_bytes - off;
+            if (chunk > 4096) chunk = 4096;
+            if (fread(new_pixels + off, 1, chunk, rf) != chunk) { read_ok = false; break; }
+            off += chunk;
+            vTaskDelay(1);
+        }
+        fclose(rf);
+        if (!read_ok) {
+            free(new_pixels);
+            ESP_LOGE(TAG, "apply_background: short read");
+            return;
+        }
     }
 
     /* Swap in the new pixel buffer */
@@ -539,6 +621,7 @@ static void ui_background_attach_common(lv_obj_t *screen, bool idle_weather)
     lv_obj_move_background(s->layer);
     s_screen_count++;
     apply_background();
+    schedule_boot_background_refresh();
 }
 
 void ui_background_attach(lv_obj_t *screen)

@@ -54,7 +54,7 @@ WEATHER_RANGES="\
 0xF014,0xF019,0xF01B,0xF01E,0xF021,0xF028,0xF02A,0xF02D,\
 0xF02E,0xF040,0xF041,0xF047,0xF04A,0xF04E,0xF050,0xF051,\
 0xF052,0xF055,0xF056,0xF072,0xF079,0xF07A,0xF07B,0xF086,\
-0xF0B1,0xF0CC"
+0xF095-0xF0B1,0xF0CC"
 
 # Temperature/clock subset: '-', '.', '/', digits, ':', space, degree sign.
 DIGIT_RANGES="0x20,0x2D-0x3A,0x00B0"
@@ -161,6 +161,36 @@ LV_FONT_DECLARE(weather_digits_150);
 #define WI_NIGHT_SNOW           "\xEF\x80\xAA"  /* U+F02A wi-night-alt-snow */
 #define WI_NIGHT_THUNDER        "\xEF\x80\xAD"  /* U+F02D wi-night-alt-thunderstorm */
 #define WI_NIGHT_FOG            "\xEF\x81\x8A"  /* U+F04A wi-night-fog */
+
+/* Moon phases */
+#define WI_MOON_NEW             "\xEF\x82\x95"  /* U+F095 wi-moon-new */
+#define WI_MOON_WAXING_CRESCENT_1 "\xEF\x82\x96"  /* U+F096 wi-moon-waxing-crescent-1 */
+#define WI_MOON_WAXING_CRESCENT_2 "\xEF\x82\x97"  /* U+F097 wi-moon-waxing-crescent-2 */
+#define WI_MOON_WAXING_CRESCENT_3 "\xEF\x82\x98"  /* U+F098 wi-moon-waxing-crescent-3 */
+#define WI_MOON_WAXING_CRESCENT_4 "\xEF\x82\x99"  /* U+F099 wi-moon-waxing-crescent-4 */
+#define WI_MOON_WAXING_CRESCENT_5 "\xEF\x82\x9A"  /* U+F09A wi-moon-waxing-crescent-5 */
+#define WI_MOON_WAXING_CRESCENT_6 "\xEF\x82\x9B"  /* U+F09B wi-moon-waxing-crescent-6 */
+#define WI_MOON_FIRST_QUARTER   "\xEF\x82\x9C"  /* U+F09C wi-moon-first-quarter */
+#define WI_MOON_WAXING_GIBBOUS_1 "\xEF\x82\x9D"  /* U+F09D wi-moon-waxing-gibbous-1 */
+#define WI_MOON_WAXING_GIBBOUS_2 "\xEF\x82\x9E"  /* U+F09E wi-moon-waxing-gibbous-2 */
+#define WI_MOON_WAXING_GIBBOUS_3 "\xEF\x82\x9F"  /* U+F09F wi-moon-waxing-gibbous-3 */
+#define WI_MOON_WAXING_GIBBOUS_4 "\xEF\x82\xA0"  /* U+F0A0 wi-moon-waxing-gibbous-4 */
+#define WI_MOON_WAXING_GIBBOUS_5 "\xEF\x82\xA1"  /* U+F0A1 wi-moon-waxing-gibbous-5 */
+#define WI_MOON_WAXING_GIBBOUS_6 "\xEF\x82\xA2"  /* U+F0A2 wi-moon-waxing-gibbous-6 */
+#define WI_MOON_FULL            "\xEF\x82\xA3"  /* U+F0A3 wi-moon-full */
+#define WI_MOON_WANING_GIBBOUS_1 "\xEF\x82\xA4"  /* U+F0A4 wi-moon-waning-gibbous-1 */
+#define WI_MOON_WANING_GIBBOUS_2 "\xEF\x82\xA5"  /* U+F0A5 wi-moon-waning-gibbous-2 */
+#define WI_MOON_WANING_GIBBOUS_3 "\xEF\x82\xA6"  /* U+F0A6 wi-moon-waning-gibbous-3 */
+#define WI_MOON_WANING_GIBBOUS_4 "\xEF\x82\xA7"  /* U+F0A7 wi-moon-waning-gibbous-4 */
+#define WI_MOON_WANING_GIBBOUS_5 "\xEF\x82\xA8"  /* U+F0A8 wi-moon-waning-gibbous-5 */
+#define WI_MOON_WANING_GIBBOUS_6 "\xEF\x82\xA9"  /* U+F0A9 wi-moon-waning-gibbous-6 */
+#define WI_MOON_THIRD_QUARTER   "\xEF\x82\xAA"  /* U+F0AA wi-moon-third-quarter */
+#define WI_MOON_WANING_CRESCENT_1 "\xEF\x82\xAB"  /* U+F0AB wi-moon-waning-crescent-1 */
+#define WI_MOON_WANING_CRESCENT_2 "\xEF\x82\xAC"  /* U+F0AC wi-moon-waning-crescent-2 */
+#define WI_MOON_WANING_CRESCENT_3 "\xEF\x82\xAD"  /* U+F0AD wi-moon-waning-crescent-3 */
+#define WI_MOON_WANING_CRESCENT_4 "\xEF\x82\xAE"  /* U+F0AE wi-moon-waning-crescent-4 */
+#define WI_MOON_WANING_CRESCENT_5 "\xEF\x82\xAF"  /* U+F0AF wi-moon-waning-crescent-5 */
+#define WI_MOON_WANING_CRESCENT_6 "\xEF\x82\xB0"  /* U+F0B0 wi-moon-waning-crescent-6 */
 
 /* Generic */
 #define WI_CLOUD                "\xEF\x81\x81"  /* U+F041 wi-cloud */

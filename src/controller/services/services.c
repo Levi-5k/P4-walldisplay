@@ -4,6 +4,7 @@
 #include "board_power.h"
 #include "board_pins.h"
 #include "led_state.h"
+#include "sd_storage.h"
 #include "wled_state.h"
 #include "weather/weather_api.h"
 
@@ -448,11 +449,15 @@ static esp_err_t geoip_http_get(const char *url, const char *provider, http_body
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) return ESP_ERR_NO_MEM;
 
+    services_network_bulk_begin();
     services_https_lock();
+    sd_storage_set_network_busy(true);
     esp_err_t err = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
+    sd_storage_set_network_busy(false);
     services_https_unlock();
+    services_network_bulk_end();
     if (err != ESP_OK) return err;
     if (status != 200 || !body->data || body->len == 0) {
         ESP_LOGW(TAG, "%s returned HTTP %d", provider, status);
@@ -1385,6 +1390,7 @@ static void rs485_rx_worker(void *arg)
 
     while (1) {
         int n = uart_read_bytes(BSP_RS485_UART_NUM, buf, sizeof(buf), pdMS_TO_TICKS(250));
+        if (n > 0) taskYIELD();
         for (int i = 0; i < n; i++) {
             char ch = (char)buf[i];
             if (ch == '\n' || ch == '\r') {

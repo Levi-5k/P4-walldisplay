@@ -38,7 +38,6 @@ idf_component_register(
         "controller/services/audio_library.c"
         "controller/services/sound_sync_tx.c"
         "controller/services/wled_state.c"
-        "controller/services/slave_ota.c"
         "controller/weather/weather_state.c"
         "controller/weather/weather_history.c"
         "controller/weather/weather_api.c"
