@@ -1,6 +1,7 @@
 #include "theme.h"
 
 static uint8_t s_surface_opacity_pct = 100;
+static bool s_shadows_enabled = true;
 
 typedef struct {
     uint32_t bg;
@@ -56,6 +57,7 @@ void theme_apply_config(const app_theme_config_t *cfg)
     if (!cfg) {
         s_palette = s_default_palette;
         theme_set_surface_opacity_pct(100);
+        theme_set_shadows_enabled(true);
         return;
     }
     s_palette.bg = clean_hex(cfg->bg_color_hex);
@@ -65,6 +67,7 @@ void theme_apply_config(const app_theme_config_t *cfg)
     s_palette.primary = clean_hex(cfg->primary_color_hex);
     s_palette.accent = clean_hex(cfg->accent_color_hex);
     theme_set_surface_opacity_pct(cfg->surface_opacity_pct);
+    theme_set_shadows_enabled(cfg->shadows_enabled);
 }
 
 static bool color_matches_hex(lv_color_t color, uint32_t hex)
@@ -169,6 +172,36 @@ uint8_t theme_surface_opacity_pct(void)
 lv_opa_t theme_surface_opa(void)
 {
     return (lv_opa_t)((s_surface_opacity_pct * 255u) / 100u);
+}
+
+bool theme_shadows_enabled(void)
+{
+    return s_shadows_enabled;
+}
+
+void theme_set_shadows_enabled(bool enabled)
+{
+    s_shadows_enabled = enabled;
+}
+
+/* Decorative card/panel shadow width: a uniform 6 px when on, 0 when off.
+ * SW shadow blur is the dominant per-frame cost on this panel, so the Settings
+ * toggle disables it outright. Objects opt in via LV_OBJ_FLAG_USER_1. */
+int32_t theme_shadow_width(void)
+{
+    return s_shadows_enabled ? 6 : 0;
+}
+
+void theme_apply_shadows(lv_obj_t *root)
+{
+    if (!root) return;
+    if (lv_obj_has_flag(root, LV_OBJ_FLAG_USER_1)) {
+        lv_obj_set_style_shadow_width(root, theme_shadow_width(), LV_PART_MAIN);
+    }
+    uint32_t child_count = lv_obj_get_child_count(root);
+    for (uint32_t child_index = 0; child_index < child_count; child_index++) {
+        theme_apply_shadows(lv_obj_get_child(root, child_index));
+    }
 }
 
 void theme_style_glass_panel(lv_obj_t *obj, lv_coord_t radius)

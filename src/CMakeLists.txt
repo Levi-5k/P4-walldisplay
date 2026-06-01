@@ -15,6 +15,7 @@ idf_component_register(
         "controller/ui/ui_init.c"
         "controller/ui/theme.c"
         "controller/ui/wled_effect_catalog.c"
+        "controller/ui/wled_palette_catalog.c"
         "controller/ui/ui_background.c"
         "controller/ui/jpeg_conv.c"
         "controller/ui/jpeg_hw.c"
@@ -48,6 +49,10 @@ idf_component_register(
         "controller/ui/fonts/weather_digits_72.c"
         "controller/ui/fonts/weather_digits_96.c"
         "controller/ui/fonts/weather_digits_150.c"
+        "controller/ui/fonts/ui_icons_24.c"
+        "controller/ui/fonts/ui_icons_28.c"
+        "controller/ui/fonts/ui_icons_32.c"
+        "controller/ui/fonts/ui_icons_bold_30.c"
     INCLUDE_DIRS
         "controller"
         "controller/ui"

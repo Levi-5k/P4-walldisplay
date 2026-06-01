@@ -219,6 +219,7 @@ void app_config_theme_defaults(app_theme_config_t *out)
     if (!out) return;
     memset(out, 0, sizeof(*out));
     out->surface_opacity_pct = 100;
+    out->shadows_enabled = true;
     out->background_dim_pct = 58;
     out->slideshow_seconds = 25;
     out->bg_color_hex = THEME_DEFAULT_BG_HEX;
@@ -502,6 +503,7 @@ esp_err_t app_config_theme_load(app_theme_config_t *out)
     if (nvs_get_u8(h, "bg_en", &u8) == ESP_OK) out->background_enabled = u8 != 0;
     if (nvs_get_u8(h, "bg_idle", &u8) == ESP_OK) out->background_idle_only = u8 != 0;
     if (nvs_get_u8(h, "surface", &u8) == ESP_OK) out->surface_opacity_pct = clamp_u8(u8, 35, 100);
+    out->shadows_enabled = (nvs_get_u8(h, "shadows", &u8) == ESP_OK) ? (u8 != 0) : true;
     if (nvs_get_u8(h, "dim", &u8) == ESP_OK) out->background_dim_pct = clamp_u8(u8, 0, 95);
     if (nvs_get_u16(h, "slide", &u16) == ESP_OK) {
         if (u16 < 5) u16 = 5;
@@ -552,6 +554,7 @@ esp_err_t app_config_theme_save(const app_theme_config_t *cfg)
 
     err = nvs_set_u8(h, "bg_en", cfg->background_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u8(h, "bg_idle", cfg->background_idle_only ? 1 : 0);
+    if (err == ESP_OK) err = nvs_set_u8(h, "shadows", cfg->shadows_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u8(h, "surface", surface);
     if (err == ESP_OK) err = nvs_set_u8(h, "dim", dim);
     if (err == ESP_OK) err = nvs_set_u16(h, "slide", slide);

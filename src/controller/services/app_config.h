@@ -78,6 +78,7 @@ typedef struct {
     bool background_idle_only;
     uint8_t surface_opacity_pct;
     uint8_t background_dim_pct;
+    bool shadows_enabled;
     uint16_t slideshow_seconds;
     uint8_t image_count;
     uint8_t next_slot;

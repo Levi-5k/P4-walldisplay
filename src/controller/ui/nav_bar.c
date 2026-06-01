@@ -1,5 +1,6 @@
 #include "nav_bar.h"
 #include "theme.h"
+#include "fonts/ui_icons.h"
 
 #define NAV_BUTTON_COUNT 4
 
@@ -59,12 +60,13 @@ void nav_bar_show_page(lv_obj_t *page)
 }
 
 static lv_obj_t *icon_btn(lv_obj_t *parent, const char *sym, const char *cap,
-                          lv_obj_t *page)
+                          const lv_font_t *icon_font, lv_obj_t *page)
 {
     (void)cap;
     lv_obj_t *b = lv_button_create(parent);
-    lv_obj_set_size(b, 76, 62);
-    lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    /* Wider pill buttons (was a 76px circle); 31px radius keeps rounded ends. */
+    lv_obj_set_size(b, 132, 62);
+    lv_obj_set_style_radius(b, 31, LV_PART_MAIN);
     lv_obj_set_style_bg_color(b, lv_color_hex(0x0A0D18), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
@@ -80,7 +82,7 @@ static lv_obj_t *icon_btn(lv_obj_t *parent, const char *sym, const char *cap,
 
     lv_obj_t *icon = lv_label_create(b);
     lv_label_set_text(icon, sym);
-    lv_obj_set_style_text_font(icon, THEME_FONT_TITLE, LV_PART_MAIN);
+    lv_obj_set_style_text_font(icon, icon_font ? icon_font : THEME_FONT_TITLE, LV_PART_MAIN);
     lv_obj_set_style_text_color(icon, THEME_TEXT_SECONDARY, LV_PART_MAIN);
     lv_obj_set_style_text_color(icon, THEME_TEXT_PRIMARY, LV_PART_MAIN | LV_STATE_CHECKED);
     lv_obj_center(icon);
@@ -112,10 +114,10 @@ lv_obj_t *nav_bar_create(lv_obj_t *parent, const nav_pages_t *pages)
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
 
-    s_buttons[0] = icon_btn(bar, LV_SYMBOL_EYE_OPEN, "Lights",   pages->lights_page);
-    s_buttons[1] = icon_btn(bar, LV_SYMBOL_REFRESH,  "Weather",  pages->weather_page);
-    s_buttons[2] = icon_btn(bar, LV_SYMBOL_PLAY,     "Timer",    pages->timer_page);
-    s_buttons[3] = icon_btn(bar, LV_SYMBOL_SETTINGS, "Settings", pages->settings_page);
+    s_buttons[0] = icon_btn(bar, UI_ICON_LIGHTS,   "Lights",   &ui_icons_32, pages->lights_page);
+    s_buttons[1] = icon_btn(bar, UI_ICON_WEATHER,  "Weather",  &ui_icons_32, pages->weather_page);
+    s_buttons[2] = icon_btn(bar, UI_ICON_TIMER,    "Timer",    &ui_icons_32, pages->timer_page);
+    s_buttons[3] = icon_btn(bar, UI_ICON_SETTINGS, "Settings", &ui_icons_32, pages->settings_page);
     s_button_pages[0] = pages->lights_page;
     s_button_pages[1] = pages->weather_page;
     s_button_pages[2] = pages->timer_page;

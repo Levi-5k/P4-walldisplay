@@ -76,6 +76,14 @@ lv_opa_t theme_surface_opa(void);
 void theme_style_glass_panel(lv_obj_t *obj, lv_coord_t radius);
 void theme_apply_surface_opacity(lv_obj_t *root);
 
+/* Decorative card/panel shadows on/off (Settings > Theme). Width is 6 px when
+ * on, 0 when off. Objects opt in by setting LV_OBJ_FLAG_USER_1 so the runtime
+ * toggle (theme_apply_shadows) can find them. */
+bool theme_shadows_enabled(void);
+void theme_set_shadows_enabled(bool enabled);
+int32_t theme_shadow_width(void);
+void theme_apply_shadows(lv_obj_t *root);
+
 /* Create a vertical flex column under parent (gap, padding) used as the
  * top-level layout of a tab/screen. */
 lv_obj_t *theme_column_create(lv_obj_t *parent);

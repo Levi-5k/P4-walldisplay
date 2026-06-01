@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_app_desc.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_psram.h"
@@ -39,6 +40,8 @@ static void log_boot_banner(void)
     esp_chip_info_t chip_info;
     esp_chip_info(&chip_info);
     ESP_LOGI(TAG, "Waveshare ESP32-P4 Smart 86 Box starting...");
+    const esp_app_desc_t *app = esp_app_get_description();
+    ESP_LOGI(TAG, "Firmware: %s %s", app ? app->project_name : "?", app ? app->version : "?");
     ESP_LOGI(TAG, "Chip: %s, cores=%d, rev=%d.%d",
              CONFIG_IDF_TARGET, chip_info.cores,
              chip_info.revision / 100, chip_info.revision % 100);
