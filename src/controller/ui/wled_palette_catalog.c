@@ -1,5 +1,7 @@
 #include "wled_palette_catalog.h"
 
+#include "esp_heap_caps.h"
+
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -50,20 +52,26 @@ static const wled_palette_catalog_item_t s_items[] = {
     {57, "Candy",         {0xEE4488, 0xFFAA55, 0x66CCFF, 0xFFFFFF}},
 };
 
-static char s_options[768];
+#define WLED_PALETTE_OPTIONS_MAX 768
+static char *s_options;
 static bool s_options_built;
+static const char s_options_fallback[] = "Default";
 
 static void build_options(void)
 {
+    if (!s_options) {
+        s_options = heap_caps_malloc(WLED_PALETTE_OPTIONS_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_options) return;
+    }
     size_t off = 0;
     size_t count = sizeof(s_items) / sizeof(s_items[0]);
-    for (size_t i = 0; i < count && off < sizeof(s_options); i++) {
-        int n = snprintf(s_options + off, sizeof(s_options) - off, "%s%s",
+    for (size_t i = 0; i < count && off < WLED_PALETTE_OPTIONS_MAX; i++) {
+        int n = snprintf(s_options + off, WLED_PALETTE_OPTIONS_MAX - off, "%s%s",
                          i ? "\n" : "", s_items[i].name);
         if (n < 0) break;
         off += (size_t)n;
     }
-    s_options[sizeof(s_options) - 1] = '\0';
+    s_options[WLED_PALETTE_OPTIONS_MAX - 1] = '\0';
     s_options_built = true;
 }
 
@@ -101,5 +109,5 @@ uint8_t wled_palette_catalog_id_for_index(uint16_t index)
 const char *wled_palette_catalog_options(void)
 {
     if (!s_options_built) build_options();
-    return s_options;
+    return s_options_built ? s_options : s_options_fallback;
 }

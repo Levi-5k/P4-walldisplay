@@ -12,6 +12,7 @@
 #include "driver/uart.h"
 #include "esp_check.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -646,7 +647,12 @@ static void geoip_start(void)
         ESP_LOGI(TAG, "IP location lookup already running");
         return;
     }
-    if (xTaskCreate(geoip_worker, "geoip", GEOIP_TASK_STACK_BYTES, NULL, 4, &s_geoip_task) != pdPASS) {
+    BaseType_t ok = xTaskCreateWithCaps(geoip_worker, "geoip", GEOIP_TASK_STACK_BYTES,
+                                        NULL, 4, &s_geoip_task,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ok != pdPASS) ok = xTaskCreate(geoip_worker, "geoip", GEOIP_TASK_STACK_BYTES,
+                                       NULL, 4, &s_geoip_task);
+    if (ok != pdPASS) {
         ESP_LOGW(TAG, "Unable to start IP location lookup");
     } else {
         ESP_LOGI(TAG, "IP location lookup started");
@@ -764,8 +770,12 @@ static void time_sync_start_monitor(void)
         return;
     }
     if (s_time_sync_task) return;
-    if (xTaskCreate(time_sync_worker, "time_sync", TIME_SYNC_TASK_STACK_BYTES,
-                    NULL, 4, &s_time_sync_task) != pdPASS) {
+    BaseType_t ok = xTaskCreateWithCaps(time_sync_worker, "time_sync", TIME_SYNC_TASK_STACK_BYTES,
+                                        NULL, 4, &s_time_sync_task,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ok != pdPASS) ok = xTaskCreate(time_sync_worker, "time_sync", TIME_SYNC_TASK_STACK_BYTES,
+                                       NULL, 4, &s_time_sync_task);
+    if (ok != pdPASS) {
         s_time_sync_task = NULL;
         status_note_time_sync(s_sntp_started, false, "Monitor failed");
         ESP_LOGW(TAG, "Unable to start time sync monitor");
@@ -1604,8 +1614,12 @@ static esp_err_t provision_start(bool force)
         if (force) xTaskNotifyGive(s_provision_task);
         return ESP_OK;
     }
-    return xTaskCreate(provision_worker, "wled_provision", 6144, NULL, 4,
-                       &s_provision_task) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    BaseType_t ok = xTaskCreateWithCaps(provision_worker, "wled_provision", 6144,
+                                        NULL, 4, &s_provision_task,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ok != pdPASS) ok = xTaskCreate(provision_worker, "wled_provision", 6144,
+                                       NULL, 4, &s_provision_task);
+    return ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
 esp_err_t provision_init(void)
@@ -1678,8 +1692,12 @@ esp_err_t link_health_init(void)
 
     wled_state_subscribe(wled_state_reconcile, NULL);
 
-    return xTaskCreate(link_health_worker, "wled_link", 4096, NULL, 4,
-                       &s_link_task) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    BaseType_t ok = xTaskCreateWithCaps(link_health_worker, "wled_link", 4096,
+                                        NULL, 4, &s_link_task,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ok != pdPASS) ok = xTaskCreate(link_health_worker, "wled_link", 4096,
+                                       NULL, 4, &s_link_task);
+    return ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
 /* --------------------------------------------------------------------------

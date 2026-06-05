@@ -82,8 +82,8 @@ static int audio_out_file_compare(const void *a, const void *b)
 
 static void *audio_out_alloc_buffer(size_t bytes)
 {
-    void *ptr = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (!ptr) ptr = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    void *ptr = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ptr) ptr = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!ptr) ptr = malloc(bytes);
     return ptr;
 }
@@ -486,8 +486,14 @@ esp_err_t audio_out_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    if (xTaskCreatePinnedToCore(audio_out_task, "audio_out", AUDIO_OUT_TASK_STACK,
-                                NULL, AUDIO_OUT_TASK_PRIO, &s_task, 0) != pdPASS) {
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(audio_out_task, "audio_out", AUDIO_OUT_TASK_STACK,
+                                                   NULL, AUDIO_OUT_TASK_PRIO, &s_task, 0,
+                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ok != pdPASS) {
+        ok = xTaskCreatePinnedToCore(audio_out_task, "audio_out", AUDIO_OUT_TASK_STACK,
+                                     NULL, AUDIO_OUT_TASK_PRIO, &s_task, 0);
+    }
+    if (ok != pdPASS) {
         s_task = NULL;
         audio_out_set_error("audio output task create failed");
         return ESP_ERR_NO_MEM;

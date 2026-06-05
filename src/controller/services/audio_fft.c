@@ -3,10 +3,12 @@
 
 #include "dsps_fft2r.h"
 #include "dsps_wind_hann.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "audio_fft";
@@ -17,8 +19,9 @@ static const char *TAG = "audio_fft";
 #define PEAK_THRESHOLD  1.4f
 #define NOISE_FLOOR     80.0f
 
-static float s_fft_buf[FFT_SIZE * 2];
-static float s_window[FFT_SIZE];
+static float *s_fft_buf;
+static float *s_window;
+static float *s_magnitudes;
 static bool s_ready;
 static float s_smooth_level;
 static float s_peak_level;
@@ -32,6 +35,25 @@ static uint8_t s_sub_count;
 static const uint16_t BIN_EDGES[FFT_BINS + 1] = {
     2, 3, 4, 6, 8, 11, 16, 22, 32, 44, 64, 88, 128, 176, 224, 248, 256
 };
+
+static esp_err_t audio_fft_alloc_buffers(void)
+{
+    if (s_fft_buf && s_window && s_magnitudes) return ESP_OK;
+
+    s_fft_buf = heap_caps_malloc(sizeof(float) * FFT_SIZE * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_window = heap_caps_malloc(sizeof(float) * FFT_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_magnitudes = heap_caps_malloc(sizeof(float) * (FFT_SIZE / 2), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_fft_buf || !s_window || !s_magnitudes) {
+        free(s_fft_buf);
+        free(s_window);
+        free(s_magnitudes);
+        s_fft_buf = NULL;
+        s_window = NULL;
+        s_magnitudes = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
 
 esp_err_t audio_fft_subscribe(audio_fft_cb_t cb, void *user)
 {
@@ -66,7 +88,6 @@ static void compute_fft(const int16_t *samples, audio_fft_result_t *out)
     dsps_fft2r_fc32(s_fft_buf, FFT_SIZE);
     dsps_bit_rev_fc32(s_fft_buf, FFT_SIZE);
 
-    float magnitudes[FFT_SIZE / 2];
     float total_mag = 0.0f;
     float major_peak_mag = 0.0f;
     int major_peak_bin = 0;
@@ -74,10 +95,10 @@ static void compute_fft(const int16_t *samples, audio_fft_result_t *out)
     for (int i = 0; i < FFT_SIZE / 2; i++) {
         float re = s_fft_buf[i * 2];
         float im = s_fft_buf[i * 2 + 1];
-        magnitudes[i] = sqrtf(re * re + im * im);
-        total_mag += magnitudes[i];
-        if (magnitudes[i] > major_peak_mag) {
-            major_peak_mag = magnitudes[i];
+        s_magnitudes[i] = sqrtf(re * re + im * im);
+        total_mag += s_magnitudes[i];
+        if (s_magnitudes[i] > major_peak_mag) {
+            major_peak_mag = s_magnitudes[i];
             major_peak_bin = i;
         }
     }
@@ -89,7 +110,7 @@ static void compute_fft(const int16_t *samples, audio_fft_result_t *out)
         float bin_sum = 0.0f;
         int count = 0;
         for (int i = BIN_EDGES[b]; i < BIN_EDGES[b + 1] && i < FFT_SIZE / 2; i++) {
-            bin_sum += magnitudes[i];
+            bin_sum += s_magnitudes[i];
             count++;
         }
         float avg = count > 0 ? bin_sum / (float)count : 0.0f;
@@ -127,7 +148,13 @@ esp_err_t audio_fft_start(void)
 {
     if (s_ready) return ESP_OK;
 
-    esp_err_t err = dsps_fft2r_init_fc32(NULL, FFT_SIZE);
+    esp_err_t err = audio_fft_alloc_buffers();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "FFT PSRAM buffer allocation failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = dsps_fft2r_init_fc32(NULL, FFT_SIZE);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "FFT table init failed: %s", esp_err_to_name(err));
         return err;

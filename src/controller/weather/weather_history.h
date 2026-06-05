@@ -19,6 +19,8 @@ typedef struct {
     int16_t feels_f;
     uint8_t humidity_pct;
     uint16_t pressure_hpa;
+    uint16_t sea_level_hpa;
+    uint16_t grnd_level_hpa;
     uint16_t wind_mph_x10;
     uint16_t wind_gust_mph_x10;
     uint16_t wind_deg;

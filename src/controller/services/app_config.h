@@ -28,6 +28,12 @@ typedef struct {
 #define APP_TIMER_HISTORY_COUNT 4
 #define APP_TIMER_MAX_SECONDS (10u * 60u * 60u)
 
+typedef enum {
+    APP_WEATHER_BOTTOM_PANEL_DATA = 0,
+    APP_WEATHER_BOTTOM_PANEL_GRAPHS = 1,
+    APP_WEATHER_BOTTOM_PANEL_CYCLE = 2,
+} app_weather_bottom_panel_mode_t;
+
 typedef struct {
     uint16_t weather_refresh_min;
     uint16_t weather_retry_s;
@@ -37,6 +43,9 @@ typedef struct {
     uint16_t weather_tab_stale_min;
     uint8_t weather_tab_wake_s;
     uint8_t weather_page_update_s;
+    uint16_t weather_graph_cycle_s;
+    uint8_t weather_bottom_panel_mode;
+    uint16_t weather_bottom_panel_cycle_s;
     uint8_t wled_poll_s;
     uint8_t wled_stale_s;
     uint8_t wled_hue_update_hz;
@@ -54,6 +63,7 @@ typedef struct {
     uint16_t idle_swipe_dismiss_min;
     bool idle_swipe_wake_lights_on;
     uint8_t status_bar_update_s;
+    bool system_cpu_load_enabled;
     uint16_t toast_duration_ms;
     uint8_t timer_audio_volume_pct;
     bool timer_repeat_until_dismissed;

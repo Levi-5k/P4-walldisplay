@@ -1,5 +1,7 @@
 #include "wled_effect_catalog.h"
 
+#include "esp_heap_caps.h"
+
 #include <stdbool.h>
 #include <stdio.h>
 
@@ -229,8 +231,9 @@ static const wled_effect_catalog_item_t s_wled_effects[] = {
     {229, "Color Clouds", {"Speed", "Intensity", "Clouds", "Colors", "Distance"}},
 };
 
-static char s_wled_effect_options[WLED_EFFECT_OPTIONS_MAX];
+static char *s_wled_effect_options;
 static bool s_wled_effect_options_ready;
+static const char s_wled_effect_options_fallback[] = "Solid";
 
 size_t wled_effect_catalog_count(void)
 {
@@ -287,23 +290,27 @@ uint8_t wled_effect_catalog_adjacent_id(uint8_t current_id, int delta)
 const char *wled_effect_catalog_options(void)
 {
     if (s_wled_effect_options_ready) return s_wled_effect_options;
+    if (!s_wled_effect_options) {
+        s_wled_effect_options = heap_caps_malloc(WLED_EFFECT_OPTIONS_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_wled_effect_options) return s_wled_effect_options_fallback;
+    }
 
     size_t offset = 0;
     for (size_t i = 0; i < wled_effect_catalog_count(); i++) {
         const char *suffix = (i + 1 < wled_effect_catalog_count()) ? "\n" : "";
         int written = snprintf(s_wled_effect_options + offset,
-                               sizeof(s_wled_effect_options) - offset,
+                               WLED_EFFECT_OPTIONS_MAX - offset,
                                "%s%s", s_wled_effects[i].name, suffix);
         if (written < 0) break;
         size_t used = (size_t)written;
-        if (used >= sizeof(s_wled_effect_options) - offset) {
-            offset = sizeof(s_wled_effect_options) - 1;
+        if (used >= WLED_EFFECT_OPTIONS_MAX - offset) {
+            offset = WLED_EFFECT_OPTIONS_MAX - 1;
             break;
         }
         offset += used;
     }
 
-    s_wled_effect_options[sizeof(s_wled_effect_options) - 1] = '\0';
+    s_wled_effect_options[WLED_EFFECT_OPTIONS_MAX - 1] = '\0';
     s_wled_effect_options_ready = true;
     return s_wled_effect_options;
 }

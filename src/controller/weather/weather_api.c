@@ -99,7 +99,7 @@ static void weather_wait_ms(uint32_t delay_ms)
     (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(delay_ms));
 }
 
-#define WEATHER_BODY_MAX (8u * 1024u)
+#define WEATHER_BODY_MAX (16u * 1024u)
 
 static esp_err_t append_body(http_body_t *body, const char *data, size_t len)
 {
@@ -187,6 +187,10 @@ static esp_err_t parse_current(const char *json, size_t len, weather_state_t *st
 
     cJSON *pressure = cJSON_GetObjectItem(main_obj, "pressure");
     if (cJSON_IsNumber(pressure)) state->pressure_hpa = clamp_u16(cJSON_GetNumberValue(pressure));
+    cJSON *sea_level = cJSON_GetObjectItem(main_obj, "sea_level");
+    if (cJSON_IsNumber(sea_level)) state->sea_level_hpa = clamp_u16(cJSON_GetNumberValue(sea_level));
+    cJSON *grnd_level = cJSON_GetObjectItem(main_obj, "grnd_level");
+    if (cJSON_IsNumber(grnd_level)) state->grnd_level_hpa = clamp_u16(cJSON_GetNumberValue(grnd_level));
 
     cJSON *wind_speed = cJSON_GetObjectItem(wind_obj, "speed");
     cJSON *wind_gust  = cJSON_GetObjectItem(wind_obj, "gust");
@@ -228,12 +232,14 @@ static esp_err_t parse_current(const char *json, size_t len, weather_state_t *st
     if (cJSON_IsNumber(snow_1h)) state->snow_1h_mm_x10 = clamp_u16(cJSON_GetNumberValue(snow_1h) * 10.0);
 
     cJSON *first_weather = cJSON_IsArray(weather_arr) ? cJSON_GetArrayItem(weather_arr, 0) : NULL;
+    cJSON *weather_id    = first_weather ? cJSON_GetObjectItem(first_weather, "id") : NULL;
     cJSON *condition    = first_weather ? cJSON_GetObjectItem(first_weather, "main") : NULL;
     cJSON *description  = first_weather ? cJSON_GetObjectItem(first_weather, "description") : NULL;
     cJSON *icon         = first_weather ? cJSON_GetObjectItem(first_weather, "icon") : NULL;
     const char *cond_text = cJSON_IsString(condition) ? condition->valuestring :
                             cJSON_IsString(description) ? description->valuestring : "Weather";
     snprintf(state->condition, sizeof(state->condition), "%s", cond_text);
+    if (cJSON_IsNumber(weather_id)) state->weather_id = clamp_u16(cJSON_GetNumberValue(weather_id));
     copy_string_field(state->description, sizeof(state->description), description);
     copy_string_field(state->icon, sizeof(state->icon), icon);
 
@@ -278,6 +284,24 @@ static bool parse_iso_date_noon_utc(const char *text, int32_t tz_offset_s, uint3
     if (month < 1 || month > 12 || day < 1 || day > 31) return false;
 
     int64_t seconds = days_from_civil(year, month, day) * 86400 + 12 * 3600 - tz_offset_s;
+    if (seconds <= 0 || seconds > UINT32_MAX) return false;
+    *out = (uint32_t)seconds;
+    return true;
+}
+
+static bool parse_iso_hour_utc(const char *text, int32_t tz_offset_s, uint32_t *out)
+{
+    if (!text || !out) return false;
+    int year = 0;
+    unsigned month = 0;
+    unsigned day = 0;
+    unsigned hour = 0;
+    unsigned minute = 0;
+    if (sscanf(text, "%d-%u-%uT%u:%u", &year, &month, &day, &hour, &minute) != 5) return false;
+    if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59) return false;
+
+    int64_t seconds = days_from_civil(year, month, day) * 86400 +
+                      (int64_t)hour * 3600 + (int64_t)minute * 60 - tz_offset_s;
     if (seconds <= 0 || seconds > UINT32_MAX) return false;
     *out = (uint32_t)seconds;
     return true;
@@ -375,6 +399,8 @@ static esp_err_t parse_forecast(const char *json, size_t len, weather_state_t *s
 
     memset(state->days, 0, sizeof(state->days));
     state->day_count = 0;
+    memset(state->hours, 0, sizeof(state->hours));
+    state->hour_count = 0;
 
     int count = cJSON_GetArraySize(times);
     if (count > cJSON_GetArraySize(codes)) count = cJSON_GetArraySize(codes);
@@ -407,6 +433,70 @@ static esp_err_t parse_forecast(const char *json, size_t len, weather_state_t *s
         open_meteo_weather_code((int)cJSON_GetNumberValue(code), day->condition, sizeof(day->condition),
                                 day->icon, sizeof(day->icon));
         state->day_count++;
+    }
+
+    cJSON *hourly = cJSON_GetObjectItem(root, "hourly");
+    cJSON *hour_times = cJSON_GetObjectItem(hourly, "time");
+    cJSON *hour_temp = cJSON_GetObjectItem(hourly, "temperature_2m");
+    cJSON *hour_humidity = cJSON_GetObjectItem(hourly, "relative_humidity_2m");
+    cJSON *hour_pressure = cJSON_GetObjectItem(hourly, "pressure_msl");
+    cJSON *hour_pop = cJSON_GetObjectItem(hourly, "precipitation_probability");
+    cJSON *hour_precip = cJSON_GetObjectItem(hourly, "precipitation");
+    cJSON *hour_rain = cJSON_GetObjectItem(hourly, "rain");
+    cJSON *hour_snow = cJSON_GetObjectItem(hourly, "snowfall");
+    if (cJSON_IsArray(hour_times) && cJSON_IsArray(hour_temp) &&
+        cJSON_IsArray(hour_humidity) && cJSON_IsArray(hour_pressure)) {
+        int hour_count = cJSON_GetArraySize(hour_times);
+        if (hour_count > cJSON_GetArraySize(hour_temp)) hour_count = cJSON_GetArraySize(hour_temp);
+        if (hour_count > cJSON_GetArraySize(hour_humidity)) hour_count = cJSON_GetArraySize(hour_humidity);
+        if (hour_count > cJSON_GetArraySize(hour_pressure)) hour_count = cJSON_GetArraySize(hour_pressure);
+        if (cJSON_IsArray(hour_pop) && hour_count > cJSON_GetArraySize(hour_pop)) hour_count = cJSON_GetArraySize(hour_pop);
+        if (cJSON_IsArray(hour_precip) && hour_count > cJSON_GetArraySize(hour_precip)) hour_count = cJSON_GetArraySize(hour_precip);
+        if (cJSON_IsArray(hour_rain) && hour_count > cJSON_GetArraySize(hour_rain)) hour_count = cJSON_GetArraySize(hour_rain);
+        if (cJSON_IsArray(hour_snow) && hour_count > cJSON_GetArraySize(hour_snow)) hour_count = cJSON_GetArraySize(hour_snow);
+        if (hour_count > WEATHER_FORECAST_HOURS) hour_count = WEATHER_FORECAST_HOURS;
+
+        for (int i = 0; i < hour_count; i++) {
+            cJSON *time_node = cJSON_GetArrayItem(hour_times, i);
+            cJSON *temp_node = cJSON_GetArrayItem(hour_temp, i);
+            cJSON *humidity_node = cJSON_GetArrayItem(hour_humidity, i);
+            cJSON *pressure_node = cJSON_GetArrayItem(hour_pressure, i);
+            if (!cJSON_IsString(time_node) || !cJSON_IsNumber(temp_node) ||
+                !cJSON_IsNumber(humidity_node) || !cJSON_IsNumber(pressure_node)) continue;
+
+            weather_hour_t *hour = &state->hours[state->hour_count];
+            if (!parse_iso_hour_utc(time_node->valuestring, tz, &hour->dt_utc)) continue;
+            hour->temp_f = (int16_t)round_double_to_i32(cJSON_GetNumberValue(temp_node));
+
+            int humidity = round_double_to_i32(cJSON_GetNumberValue(humidity_node));
+            if (humidity < 0) humidity = 0;
+            if (humidity > 100) humidity = 100;
+            hour->humidity_pct = (uint8_t)humidity;
+            hour->pressure_hpa = clamp_u16(cJSON_GetNumberValue(pressure_node));
+
+            if (cJSON_IsArray(hour_pop)) {
+                cJSON *pop_node = cJSON_GetArrayItem(hour_pop, i);
+                if (cJSON_IsNumber(pop_node)) {
+                    int pct = round_double_to_i32(cJSON_GetNumberValue(pop_node));
+                    if (pct < 0) pct = 0;
+                    if (pct > 100) pct = 100;
+                    hour->pop_pct = (uint8_t)pct;
+                }
+            }
+            if (cJSON_IsArray(hour_precip)) {
+                cJSON *precip_node = cJSON_GetArrayItem(hour_precip, i);
+                if (cJSON_IsNumber(precip_node)) hour->precip_mm_x10 = clamp_u16(cJSON_GetNumberValue(precip_node) * 10.0);
+            }
+            if (cJSON_IsArray(hour_rain)) {
+                cJSON *rain_node = cJSON_GetArrayItem(hour_rain, i);
+                if (cJSON_IsNumber(rain_node)) hour->rain_mm_x10 = clamp_u16(cJSON_GetNumberValue(rain_node) * 10.0);
+            }
+            if (cJSON_IsArray(hour_snow)) {
+                cJSON *snow_node = cJSON_GetArrayItem(hour_snow, i);
+                if (cJSON_IsNumber(snow_node)) hour->snow_mm_x10 = clamp_u16(cJSON_GetNumberValue(snow_node) * 10.0);
+            }
+            state->hour_count++;
+        }
     }
 
     cJSON_Delete(root);
@@ -489,7 +579,7 @@ static esp_err_t fetch_once(const weather_config_t *cfg)
 
     char lat[20];
     char lon[20];
-    char url[384];
+    char url[640];
     format_coord(lat, sizeof(lat), cfg->lat_x1e6);
     format_coord(lon, sizeof(lon), cfg->lon_x1e6);
 
@@ -534,8 +624,8 @@ static esp_err_t fetch_once(const weather_config_t *cfg)
     vTaskDelay(pdMS_TO_TICKS((uint32_t)tuning.weather_forecast_gap_s * 1000u));
     services_status_note_weather(true, false, "Fetching forecast");
     snprintf(url, sizeof(url),
-             "http://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s&current=wind_gusts_10m,uv_index&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,uv_index_max&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto&forecast_days=%u",
-             lat, lon, (unsigned)WEATHER_FORECAST_DAYS);
+             "http://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s&current=wind_gusts_10m,uv_index&hourly=temperature_2m,relative_humidity_2m,pressure_msl,precipitation_probability,precipitation,rain,snowfall&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,uv_index_max&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=mm&timezone=auto&forecast_days=%u&forecast_hours=%u",
+             lat, lon, (unsigned)WEATHER_FORECAST_DAYS, (unsigned)WEATHER_FORECAST_HOURS);
 
     ESP_LOGI(TAG, "weather fetch forecast");
     http_body_t fbody = {0};
@@ -555,8 +645,8 @@ static esp_err_t fetch_once(const weather_config_t *cfg)
             }
             if (state.uv_index_valid) snprintf(uv, sizeof(uv), "%u", state.uv_index);
             else                      snprintf(uv, sizeof(uv), "n/a");
-            ESP_LOGI(TAG, "weather forecast updated: %u days, gust=%s, uv=%s",
-                     state.day_count, gust, uv);
+            ESP_LOGI(TAG, "weather forecast updated: %u days, %u hours, gust=%s, uv=%s",
+                     state.day_count, state.hour_count, gust, uv);
         }
     } else {
         if (ferr == ESP_OK) ferr = ESP_ERR_INVALID_RESPONSE;
@@ -646,8 +736,12 @@ esp_err_t weather_api_init(void)
         services_status_note_weather(true, false, "Weather queued");
     }
 
-    if (xTaskCreate(weather_worker, "weather_api", WEATHER_TASK_STACK_BYTES, NULL, 4,
-                    &s_weather_task) == pdPASS) {
+    BaseType_t ok = xTaskCreateWithCaps(weather_worker, "weather_api", WEATHER_TASK_STACK_BYTES,
+                                        NULL, 4, &s_weather_task,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ok != pdPASS) ok = xTaskCreate(weather_worker, "weather_api", WEATHER_TASK_STACK_BYTES,
+                                       NULL, 4, &s_weather_task);
+    if (ok == pdPASS) {
         return ESP_OK;
     }
     s_weather_task = NULL;

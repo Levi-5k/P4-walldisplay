@@ -256,6 +256,9 @@ void app_config_tuning_defaults(app_tuning_config_t *out)
     out->weather_tab_stale_min = 10;
     out->weather_tab_wake_s = 15;
     out->weather_page_update_s = 1;
+    out->weather_graph_cycle_s = 15;
+    out->weather_bottom_panel_mode = APP_WEATHER_BOTTOM_PANEL_DATA;
+    out->weather_bottom_panel_cycle_s = 30;
     out->wled_poll_s = 5;
     out->wled_stale_s = 30;
     out->wled_hue_update_hz = 5;
@@ -273,6 +276,7 @@ void app_config_tuning_defaults(app_tuning_config_t *out)
     out->idle_swipe_dismiss_min = 30;
     out->idle_swipe_wake_lights_on = true;
     out->status_bar_update_s = 1;
+    out->system_cpu_load_enabled = false;
     out->toast_duration_ms = 1600;
     out->timer_audio_volume_pct = 70;
     out->timer_repeat_until_dismissed = true;
@@ -305,6 +309,9 @@ static void app_config_tuning_clamp(app_tuning_config_t *cfg)
     cfg->weather_tab_stale_min = clamp_u16(cfg->weather_tab_stale_min, 1, 60);
     cfg->weather_tab_wake_s = clamp_u8(cfg->weather_tab_wake_s, 5, 120);
     cfg->weather_page_update_s = clamp_u8(cfg->weather_page_update_s, 1, 10);
+    cfg->weather_graph_cycle_s = clamp_u16(cfg->weather_graph_cycle_s, 5, 300);
+    cfg->weather_bottom_panel_mode = clamp_u8(cfg->weather_bottom_panel_mode, APP_WEATHER_BOTTOM_PANEL_DATA, APP_WEATHER_BOTTOM_PANEL_CYCLE);
+    cfg->weather_bottom_panel_cycle_s = clamp_u16(cfg->weather_bottom_panel_cycle_s, 5, 300);
     cfg->wled_poll_s = clamp_u8(cfg->wled_poll_s, 2, 30);
     cfg->wled_stale_s = clamp_u8(cfg->wled_stale_s, 10, 120);
     if (cfg->wled_stale_s < cfg->wled_poll_s * 2) cfg->wled_stale_s = cfg->wled_poll_s * 2;
@@ -326,6 +333,7 @@ static void app_config_tuning_clamp(app_tuning_config_t *cfg)
     cfg->idle_swipe_dismiss_min = clamp_u16(cfg->idle_swipe_dismiss_min, 1, 240);
     cfg->idle_swipe_wake_lights_on = cfg->idle_swipe_wake_lights_on ? true : false;
     cfg->status_bar_update_s = clamp_u8(cfg->status_bar_update_s, 1, 10);
+    cfg->system_cpu_load_enabled = cfg->system_cpu_load_enabled ? true : false;
     cfg->toast_duration_ms = clamp_u16(cfg->toast_duration_ms, 800, 5000);
     cfg->timer_audio_volume_pct = clamp_u8(cfg->timer_audio_volume_pct, 0, 100);
     cfg->timer_repeat_until_dismissed = cfg->timer_repeat_until_dismissed ? true : false;
@@ -372,6 +380,9 @@ esp_err_t app_config_tuning_load(app_tuning_config_t *out)
     if (nvs_get_u16(h, "wx_stale", &u16) == ESP_OK) out->weather_tab_stale_min = u16;
     if (nvs_get_u8(h, "wx_wake", &u8) == ESP_OK) out->weather_tab_wake_s = u8;
     if (nvs_get_u8(h, "wx_ui", &u8) == ESP_OK) out->weather_page_update_s = u8;
+    if (nvs_get_u16(h, "wx_graph_cyc", &u16) == ESP_OK) out->weather_graph_cycle_s = u16;
+    if (nvs_get_u8(h, "wx_btm", &u8) == ESP_OK) out->weather_bottom_panel_mode = u8;
+    if (nvs_get_u16(h, "wx_btm_cyc", &u16) == ESP_OK) out->weather_bottom_panel_cycle_s = u16;
     if (nvs_get_u8(h, "wl_poll", &u8) == ESP_OK) out->wled_poll_s = u8;
     if (nvs_get_u8(h, "wl_stale", &u8) == ESP_OK) out->wled_stale_s = u8;
     if (nvs_get_u8(h, "wl_hue_hz", &u8) == ESP_OK) out->wled_hue_update_hz = u8;
@@ -389,6 +400,7 @@ esp_err_t app_config_tuning_load(app_tuning_config_t *out)
     if (nvs_get_u16(h, "idle_swp_min", &u16) == ESP_OK) out->idle_swipe_dismiss_min = u16;
     if (nvs_get_u8(h, "idle_swp_wl", &u8) == ESP_OK) out->idle_swipe_wake_lights_on = u8 != 0;
     if (nvs_get_u8(h, "stat_upd", &u8) == ESP_OK) out->status_bar_update_s = u8;
+    if (nvs_get_u8(h, "sys_cpu", &u8) == ESP_OK) out->system_cpu_load_enabled = u8 != 0;
     if (nvs_get_u16(h, "toast_ms", &u16) == ESP_OK) out->toast_duration_ms = u16;
     if (nvs_get_u8(h, "tmr_vol", &u8) == ESP_OK) out->timer_audio_volume_pct = u8;
     if (nvs_get_u8(h, "tmr_repeat", &u8) == ESP_OK) out->timer_repeat_until_dismissed = u8 != 0;
@@ -435,6 +447,9 @@ esp_err_t app_config_tuning_save(const app_tuning_config_t *cfg)
     if (err == ESP_OK) err = nvs_set_u16(h, "wx_stale", clean.weather_tab_stale_min);
     if (err == ESP_OK) err = nvs_set_u8(h, "wx_wake", clean.weather_tab_wake_s);
     if (err == ESP_OK) err = nvs_set_u8(h, "wx_ui", clean.weather_page_update_s);
+    if (err == ESP_OK) err = nvs_set_u16(h, "wx_graph_cyc", clean.weather_graph_cycle_s);
+    if (err == ESP_OK) err = nvs_set_u8(h, "wx_btm", clean.weather_bottom_panel_mode);
+    if (err == ESP_OK) err = nvs_set_u16(h, "wx_btm_cyc", clean.weather_bottom_panel_cycle_s);
     if (err == ESP_OK) err = nvs_set_u8(h, "wl_poll", clean.wled_poll_s);
     if (err == ESP_OK) err = nvs_set_u8(h, "wl_stale", clean.wled_stale_s);
     if (err == ESP_OK) err = nvs_set_u8(h, "wl_hue_hz", clean.wled_hue_update_hz);
@@ -452,6 +467,7 @@ esp_err_t app_config_tuning_save(const app_tuning_config_t *cfg)
     if (err == ESP_OK) err = nvs_set_u16(h, "idle_swp_min", clean.idle_swipe_dismiss_min);
     if (err == ESP_OK) err = nvs_set_u8(h, "idle_swp_wl", clean.idle_swipe_wake_lights_on ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u8(h, "stat_upd", clean.status_bar_update_s);
+    if (err == ESP_OK) err = nvs_set_u8(h, "sys_cpu", clean.system_cpu_load_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u16(h, "toast_ms", clean.toast_duration_ms);
     if (err == ESP_OK) err = nvs_set_u8(h, "tmr_vol", clean.timer_audio_volume_pct);
     if (err == ESP_OK) err = nvs_set_u8(h, "tmr_repeat", clean.timer_repeat_until_dismissed ? 1 : 0);

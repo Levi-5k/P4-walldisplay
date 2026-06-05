@@ -21,10 +21,14 @@
 static const char *TAG = "ui_init";
 static lv_obj_t *s_weather_page;
 static lv_obj_t *s_timer_page;
+static lv_obj_t *s_settings_page;
+static lv_obj_t *s_active_page;
 
 static void main_nav_page_shown(lv_obj_t *page, void *user_data)
 {
     (void)user_data;
+    if (page == s_settings_page && s_active_page == s_settings_page) screen_settings_show_home();
+    s_active_page = page;
     if (page == s_weather_page) screen_weather_activate();
     idle_manager_set_inhibited(page == s_timer_page);
 }
@@ -61,6 +65,7 @@ static void build_main_ui(void)
     pages.settings_page = screen_settings_create(content);
     s_weather_page = pages.weather_page;
     s_timer_page = pages.timer_page;
+    s_settings_page = pages.settings_page;
     pages.page_shown_cb = main_nav_page_shown;
 
     lv_obj_t *navwrap = lv_obj_create(scr);

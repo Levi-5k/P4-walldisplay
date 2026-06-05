@@ -140,7 +140,7 @@ typedef struct {
     lv_obj_t *value_label;
 } timer_stepper_ctx_t;
 
-#define TIMER_SETTINGS_STEPPER_MAX 12
+#define TIMER_SETTINGS_STEPPER_MAX 10
 static timer_stepper_ctx_t s_timer_steppers[TIMER_SETTINGS_STEPPER_MAX];
 static int s_timer_stepper_count;
 
@@ -1268,17 +1268,47 @@ static lv_obj_t *timer_picker_roller_create(lv_obj_t *parent, const char *option
     return roller;
 }
 
+#define TIMER_PICKER_HOUR_OPTIONS_BYTES   128
+#define TIMER_PICKER_MINUTE_OPTIONS_BYTES 512
+#define TIMER_PICKER_SECOND_OPTIONS_BYTES 512
+
+static char *s_timer_hour_options;
+static char *s_timer_minute_options;
+static char *s_timer_second_options;
+
+static bool timer_picker_options_ensure(void)
+{
+    if (s_timer_hour_options && s_timer_minute_options && s_timer_second_options) return true;
+
+    s_timer_hour_options = heap_caps_calloc(1, TIMER_PICKER_HOUR_OPTIONS_BYTES,
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_timer_minute_options = heap_caps_calloc(1, TIMER_PICKER_MINUTE_OPTIONS_BYTES,
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_timer_second_options = heap_caps_calloc(1, TIMER_PICKER_SECOND_OPTIONS_BYTES,
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_timer_hour_options || !s_timer_minute_options || !s_timer_second_options) {
+        free(s_timer_hour_options);
+        free(s_timer_minute_options);
+        free(s_timer_second_options);
+        s_timer_hour_options = NULL;
+        s_timer_minute_options = NULL;
+        s_timer_second_options = NULL;
+        ESP_LOGE(TAG, "Timer picker PSRAM option allocation failed");
+        return false;
+    }
+
+    timer_build_range_options(s_timer_hour_options, TIMER_PICKER_HOUR_OPTIONS_BYTES,
+                              TIMER_PICKER_MAX_HOURS, "hour", "hours");
+    timer_build_range_options(s_timer_minute_options, TIMER_PICKER_MINUTE_OPTIONS_BYTES,
+                              59, "min", "min");
+    timer_build_range_options(s_timer_second_options, TIMER_PICKER_SECOND_OPTIONS_BYTES,
+                              59, "sec", "sec");
+    return true;
+}
+
 static void timer_picker_create(lv_obj_t *parent)
 {
-    static char hour_options[128];
-    static char minute_options[512];
-    static char second_options[512];
-
-    if (!hour_options[0]) {
-        timer_build_range_options(hour_options, sizeof(hour_options), TIMER_PICKER_MAX_HOURS, "hour", "hours");
-        timer_build_range_options(minute_options, sizeof(minute_options), 59, "min", "min");
-        timer_build_range_options(second_options, sizeof(second_options), 59, "sec", "sec");
-    }
+    if (!timer_picker_options_ensure()) return;
 
     s_picker_panel = lv_obj_create(parent);
     lv_obj_remove_style_all(s_picker_panel);
@@ -1306,9 +1336,9 @@ static void timer_picker_create(lv_obj_t *parent)
     lv_obj_set_flex_align(roller_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_clear_flag(roller_row, LV_OBJ_FLAG_SCROLLABLE);
 
-    s_hour_roller = timer_picker_roller_create(roller_row, hour_options);
-    s_minute_roller = timer_picker_roller_create(roller_row, minute_options);
-    s_second_roller = timer_picker_roller_create(roller_row, second_options);
+    s_hour_roller = timer_picker_roller_create(roller_row, s_timer_hour_options);
+    s_minute_roller = timer_picker_roller_create(roller_row, s_timer_minute_options);
+    s_second_roller = timer_picker_roller_create(roller_row, s_timer_second_options);
 }
 
 static void timer_history_create(lv_obj_t *parent)

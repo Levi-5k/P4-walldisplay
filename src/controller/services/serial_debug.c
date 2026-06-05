@@ -7,6 +7,7 @@
 #include "wled_state.h"
 
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "sdkconfig.h"
@@ -109,7 +110,7 @@ static bool serial_debug_read_byte(uint8_t *ch)
 
 static void serial_debug_help(void)
 {
-    serial_debug_reply("commands: help, bg help, audio help, rs485 help");
+    serial_debug_reply("commands: help, heap, bg help, audio help, rs485 help");
     serial_debug_reply("bg: bg status, bg download [preset], bg delete");
     serial_debug_reply("audio: audio status, audio test, audio list, audio assets, audio download, audio play <file|#>, audio stop");
     serial_debug_reply("rs485: rs485 status, rs485 ping, rs485 provision, rs485 send <json>");
@@ -118,6 +119,28 @@ static void serial_debug_help(void)
 static const char *yesno(bool value)
 {
     return value ? "yes" : "no";
+}
+
+static void serial_debug_heap_line(const char *label, uint32_t caps)
+{
+    size_t total = heap_caps_get_total_size(caps);
+    size_t free_now = heap_caps_get_free_size(caps);
+    size_t min_free = heap_caps_get_minimum_free_size(caps);
+    size_t largest = heap_caps_get_largest_free_block(caps);
+    unsigned used_pct = total && free_now < total ? (unsigned)(((total - free_now) * 100u + total / 2u) / total) : 0u;
+    serial_debug_reply("heap %s: used=%u%% free=%uKB min=%uKB largest=%uKB total=%uKB",
+                       label, used_pct,
+                       (unsigned)(free_now / 1024u),
+                       (unsigned)(min_free / 1024u),
+                       (unsigned)(largest / 1024u),
+                       (unsigned)(total / 1024u));
+}
+
+static void handle_heap_command(void)
+{
+    serial_debug_heap_line("internal", MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    serial_debug_heap_line("dma", MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    serial_debug_heap_line("psram", MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 }
 
 static void handle_rs485_status(void)
@@ -471,6 +494,8 @@ static void handle_serial_line(char *line)
         handle_audio_command(cursor);
     } else if (strcasecmp(cmd, "rs485") == 0 || strcasecmp(cmd, "wled") == 0) {
         handle_rs485_command(cursor);
+    } else if (strcasecmp(cmd, "heap") == 0 || strcasecmp(cmd, "mem") == 0) {
+        handle_heap_command();
     } else if (strcasecmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
         serial_debug_help();
     } else {
@@ -481,7 +506,7 @@ static void handle_serial_line(char *line)
 static void serial_debug_task(void *arg)
 {
     (void)arg;
-    static char line[SERIAL_DEBUG_LINE_MAX];
+    char line[SERIAL_DEBUG_LINE_MAX];
     size_t pos = 0;
     serial_debug_reply("serial diagnostics ready; type help");
 
@@ -508,8 +533,12 @@ esp_err_t serial_debug_init(void)
 
     serial_debug_configure_stdin();
 
-    if (xTaskCreate(serial_debug_task, "serial_diag", SERIAL_DEBUG_TASK_STACK,
-                    NULL, 3, &s_serial_debug_task) != pdPASS) {
+    BaseType_t ok = xTaskCreateWithCaps(serial_debug_task, "serial_diag", SERIAL_DEBUG_TASK_STACK,
+                                        NULL, 3, &s_serial_debug_task,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ok != pdPASS) ok = xTaskCreate(serial_debug_task, "serial_diag", SERIAL_DEBUG_TASK_STACK,
+                                       NULL, 3, &s_serial_debug_task);
+    if (ok != pdPASS) {
         s_serial_debug_task = NULL;
         ESP_LOGW(TAG, "serial diagnostics task create failed");
         return ESP_ERR_NO_MEM;

@@ -37,6 +37,7 @@
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "esp_vfs_fat.h"
+#include "sdkconfig.h"
 
 #include "bsp/esp-bsp.h"
 #include "freertos/FreeRTOS.h"
@@ -109,21 +110,38 @@ static lv_obj_t *wled_qr_grid_create(lv_obj_t *parent, const char *url)
 {
     if (!url || !url[0]) return NULL;
 
-    static uint8_t qr[qrcodegen_BUFFER_LEN_MAX];
-    static uint8_t temp[qrcodegen_BUFFER_LEN_MAX];
+    uint8_t *qr = heap_caps_malloc(qrcodegen_BUFFER_LEN_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t *temp = heap_caps_malloc(qrcodegen_BUFFER_LEN_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!qr || !temp) {
+        free(qr);
+        free(temp);
+        return NULL;
+    }
     bool ok = qrcodegen_encodeText(url, temp, qr, qrcodegen_Ecc_MEDIUM,
                                    qrcodegen_VERSION_MIN, qrcodegen_VERSION_MAX,
                                    qrcodegen_Mask_AUTO, true);
-    if (!ok) return NULL;
+    if (!ok) {
+        free(qr);
+        free(temp);
+        return NULL;
+    }
 
     const int32_t qr_px = 168;
     const int32_t quiet_modules = 4;
     int32_t qr_modules = qrcodegen_getSize(qr);
-    if (qr_modules <= 0) return NULL;
+    if (qr_modules <= 0) {
+        free(qr);
+        free(temp);
+        return NULL;
+    }
 
     int32_t total_modules = qr_modules + quiet_modules * 2;
     int32_t module_px = qr_px / total_modules;
-    if (module_px < 1) return NULL;
+    if (module_px < 1) {
+        free(qr);
+        free(temp);
+        return NULL;
+    }
     int32_t offset = (qr_px - total_modules * module_px) / 2 + quiet_modules * module_px;
 
     lv_obj_t *box = lv_obj_create(parent);
@@ -155,6 +173,8 @@ static lv_obj_t *wled_qr_grid_create(lv_obj_t *parent, const char *url)
         }
     }
 
+    free(qr);
+    free(temp);
     return box;
 }
 #endif
@@ -1558,22 +1578,88 @@ static lv_obj_t *s_wx_wind_compass;
 static lv_obj_t *s_wx_wind_degree;
 static lv_obj_t *s_wx_wind_needle;
 static lv_point_precise_t s_wx_wind_points[2];
-static lv_obj_t *s_wx_history_chart;
-static lv_chart_series_t *s_wx_history_temp_series;
-static lv_chart_series_t *s_wx_history_hum_series;
-static lv_obj_t *s_wx_history_summary;
-static lv_obj_t *s_wx_history_status;
 
-#define WX_HISTORY_CHART_POINTS 24
-static weather_history_t s_wx_history_cache;
-static int32_t s_wx_history_temp_values[WX_HISTORY_CHART_POINTS];
-static int32_t s_wx_history_hum_values[WX_HISTORY_CHART_POINTS];
+#define WX_HISTORY_CHART_POINTS WEATHER_HISTORY_MAX_POINTS
+#define WX_HISTORY_WINDOW_SECONDS (24u * 60u * 60u)
+#define WX_HISTORY_SLOT_SECONDS (WX_HISTORY_WINDOW_SECONDS / WX_HISTORY_CHART_POINTS)
+#define WX_HISTORY_VALID_NOW_UTC 1704067200u
+#define WX_HISTORY_SERIES_REAL_A 0
+#define WX_HISTORY_SERIES_REAL_B 1
+#define WX_HISTORY_SERIES_FILL_A 2
+#define WX_HISTORY_SERIES_FILL_B 3
+#define WX_HISTORY_SERIES_COUNT 4
+typedef int32_t wx_history_chart_values_t[WX_HISTORY_SERIES_COUNT][WX_HISTORY_CHART_POINTS];
+
+typedef enum {
+    WX_GRAPH_TEMP,
+    WX_GRAPH_HUM_CLOUDS,
+    WX_GRAPH_PRESSURE,
+    WX_GRAPH_WIND,
+    WX_GRAPH_PRECIP,
+    WX_GRAPH_COUNT,
+} wx_graph_mode_t;
+
+typedef struct {
+    lv_obj_t *carousel;
+    lv_obj_t *chart[WX_GRAPH_COUNT];
+    lv_chart_series_t *fill_series[WX_GRAPH_COUNT][2];
+    lv_chart_series_t *series[WX_GRAPH_COUNT][2];
+    lv_obj_t *data_a[WX_GRAPH_COUNT];
+    lv_obj_t *data_b[WX_GRAPH_COUNT];
+    lv_obj_t *axis_hi[WX_GRAPH_COUNT];
+    lv_obj_t *axis_lo[WX_GRAPH_COUNT];
+    lv_obj_t *time_start[WX_GRAPH_COUNT];
+    lv_obj_t *time_mid[WX_GRAPH_COUNT];
+    lv_obj_t *time_end[WX_GRAPH_COUNT];
+    lv_obj_t *status;
+} wx_history_graph_view_t;
+
+static wx_history_graph_view_t s_wx_history_view;
+static weather_history_t *s_wx_history_cache;
+static wx_history_chart_values_t *s_wx_history_values;
 
 #define WX_FORECAST_SLOTS WEATHER_FORECAST_DAYS
 static lv_obj_t *s_wx_day_name[WX_FORECAST_SLOTS];
 static lv_obj_t *s_wx_day_icon[WX_FORECAST_SLOTS];
 static lv_obj_t *s_wx_day_temp[WX_FORECAST_SLOTS];
 static lv_obj_t *s_wx_day_pop[WX_FORECAST_SLOTS];
+static lv_obj_t *s_wx_day_cond[WX_FORECAST_SLOTS];
+
+#define WX_FORECAST_GRAPH_POINTS WEATHER_FORECAST_HOURS
+typedef int32_t wx_forecast_chart_values_t[WX_FORECAST_GRAPH_POINTS];
+
+typedef enum {
+    WX_FC_GRAPH_PRESSURE,
+    WX_FC_GRAPH_TEMP,
+    WX_FC_GRAPH_HUMIDITY,
+    WX_FC_GRAPH_PRECIP,
+    WX_FC_GRAPH_COUNT,
+} wx_forecast_graph_t;
+
+typedef struct {
+    lv_obj_t *carousel;
+    lv_obj_t *chart[WX_FC_GRAPH_COUNT];
+    lv_chart_series_t *series[WX_FC_GRAPH_COUNT];
+    lv_obj_t *data_hi[WX_FC_GRAPH_COUNT];
+    lv_obj_t *data_lo[WX_FC_GRAPH_COUNT];
+    lv_obj_t *axis_hi[WX_FC_GRAPH_COUNT];
+    lv_obj_t *axis_lo[WX_FC_GRAPH_COUNT];
+    lv_obj_t *time_start[WX_FC_GRAPH_COUNT];
+    lv_obj_t *time_mid[WX_FC_GRAPH_COUNT];
+    lv_obj_t *time_end[WX_FC_GRAPH_COUNT];
+    lv_obj_t *status;
+} wx_forecast_graph_view_t;
+
+static wx_forecast_graph_view_t s_wx_fc_view;
+static wx_forecast_graph_view_t s_idle_fc_view;
+static lv_timer_t *s_wx_fc_cycle_timer;
+static wx_forecast_chart_values_t *s_wx_fc_values;
+#define WX_CAROUSEL_MANUAL_PAUSE_MS 15000u
+#define WX_CAROUSEL_AUTO_SCROLL_GUARD_MS 2000u
+static uint32_t s_wx_carousel_manual_pause_until_ms;
+static uint32_t s_wx_carousel_auto_scroll_guard_until_ms;
+static lv_obj_t *s_idle_screen;
+static bool s_idle_graph_visible;
 
 static lv_obj_t *s_weather_page_root;
 static lv_timer_t *s_weather_refresh_timer;
@@ -1595,6 +1681,121 @@ static uint32_t weather_page_update_period_ms(void)
 static void weather_refresh_timer_apply(void)
 {
     if (s_weather_refresh_timer) lv_timer_set_period(s_weather_refresh_timer, weather_page_update_period_ms());
+}
+
+static uint32_t weather_graph_cycle_period_ms(void)
+{
+    app_tuning_config_t cfg = load_tuning_config();
+    return (uint32_t)cfg.weather_graph_cycle_s * 1000u;
+}
+
+static void weather_graph_cycle_timer_apply(void)
+{
+    if (s_wx_fc_cycle_timer) {
+        lv_timer_set_period(s_wx_fc_cycle_timer, weather_graph_cycle_period_ms());
+        lv_timer_reset(s_wx_fc_cycle_timer);
+    }
+}
+
+static void weather_graph_cycle_timer_reset(void)
+{
+    if (s_wx_fc_cycle_timer) lv_timer_reset(s_wx_fc_cycle_timer);
+}
+
+static weather_history_t *wx_history_cache_get(void)
+{
+    if (s_wx_history_cache) return s_wx_history_cache;
+    s_wx_history_cache = heap_caps_calloc(1, sizeof(*s_wx_history_cache),
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return s_wx_history_cache;
+}
+
+static wx_history_chart_values_t *wx_history_values_get(void)
+{
+    if (s_wx_history_values) return s_wx_history_values;
+    s_wx_history_values = heap_caps_calloc(WX_GRAPH_COUNT, sizeof(*s_wx_history_values),
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return s_wx_history_values;
+}
+
+static wx_forecast_chart_values_t *wx_forecast_values_get(void)
+{
+    if (s_wx_fc_values) return s_wx_fc_values;
+    s_wx_fc_values = heap_caps_calloc(WX_FC_GRAPH_COUNT, sizeof(*s_wx_fc_values),
+                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return s_wx_fc_values;
+}
+
+static uint8_t wx_carousel_index(lv_obj_t *carousel, uint8_t count)
+{
+    if (!carousel || count == 0) return 0;
+    lv_coord_t width = lv_obj_get_width(carousel);
+    if (width <= 0) return 0;
+    lv_coord_t x = lv_obj_get_scroll_x(carousel);
+    int32_t idx = (x + width / 2) / width;
+    if (idx < 0) idx = 0;
+    if (idx >= count) idx = count - 1;
+    return (uint8_t)idx;
+}
+
+static void wx_carousel_scroll_to(lv_obj_t *carousel, uint8_t index, uint8_t count, lv_anim_enable_t anim)
+{
+    if (!carousel || count == 0) return;
+    if (index >= count) index = 0;
+    lv_coord_t width = lv_obj_get_width(carousel);
+    if (width <= 0) return;
+    lv_obj_scroll_to_x(carousel, (lv_coord_t)index * width, anim);
+}
+
+static void wx_carousel_advance(lv_obj_t *carousel, uint8_t count)
+{
+    if (!carousel || count == 0 || lv_obj_has_flag(carousel, LV_OBJ_FLAG_HIDDEN)) return;
+    uint8_t index = wx_carousel_index(carousel, count);
+    s_wx_carousel_auto_scroll_guard_until_ms = ui_now_ms() + WX_CAROUSEL_AUTO_SCROLL_GUARD_MS;
+    wx_carousel_scroll_to(carousel, (uint8_t)((index + 1) % count), count, LV_ANIM_ON);
+}
+
+static void wx_carousel_manual_scroll_cb(lv_event_t *e)
+{
+    lv_obj_t *target = lv_event_get_target(e);
+    bool manual = false;
+
+    if (hold_active_until(s_wx_carousel_auto_scroll_guard_until_ms)) return;
+
+    if (lv_event_get_code(e) == LV_EVENT_SCROLL_THROW_BEGIN) {
+        manual = true;
+    } else {
+        lv_indev_t *indev = lv_indev_active();
+        if (indev && lv_indev_get_scroll_obj(indev) == target) manual = true;
+    }
+
+    if (manual) {
+        s_wx_carousel_manual_pause_until_ms = ui_now_ms() + WX_CAROUSEL_MANUAL_PAUSE_MS;
+        weather_graph_cycle_timer_reset();
+    }
+}
+
+static void wx_carousel_attach_manual_pause(lv_obj_t *carousel)
+{
+    if (!carousel) return;
+    lv_obj_add_event_cb(carousel, wx_carousel_manual_scroll_cb, LV_EVENT_SCROLL, NULL);
+    lv_obj_add_event_cb(carousel, wx_carousel_manual_scroll_cb, LV_EVENT_SCROLL_END, NULL);
+    lv_obj_add_event_cb(carousel, wx_carousel_manual_scroll_cb, LV_EVENT_SCROLL_THROW_BEGIN, NULL);
+}
+
+static void weather_graph_cycle_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (hold_active_until(s_wx_carousel_manual_pause_until_ms)) return;
+    if (s_wx_fc_view.carousel && s_weather_page_root && !lv_obj_has_flag(s_weather_page_root, LV_OBJ_FLAG_HIDDEN)) {
+        wx_carousel_advance(s_wx_fc_view.carousel, WX_FC_GRAPH_COUNT);
+    }
+    if (s_wx_history_view.carousel && s_weather_page_root && !lv_obj_has_flag(s_weather_page_root, LV_OBJ_FLAG_HIDDEN)) {
+        wx_carousel_advance(s_wx_history_view.carousel, WX_GRAPH_COUNT);
+    }
+    if (s_idle_fc_view.carousel && s_idle_screen && lv_screen_active() == s_idle_screen && s_idle_graph_visible) {
+        wx_carousel_advance(s_idle_fc_view.carousel, WX_FC_GRAPH_COUNT);
+    }
 }
 
 static const char *weather_symbol(const char *condition, const char *icon_code, bool is_night)
@@ -1791,64 +1992,637 @@ static void wx_wind_visual_set(const weather_state_t *w)
     }
 }
 
-static void wx_history_refresh(void)
+static const char *wx_graph_title(wx_graph_mode_t mode)
 {
-    if (weather_history_get(&s_wx_history_cache) != ESP_OK || !s_wx_history_chart ||
-        !s_wx_history_temp_series || !s_wx_history_hum_series) return;
-    const weather_history_t *history = &s_wx_history_cache;
+    switch (mode) {
+        case WX_GRAPH_TEMP:       return "Temperature";
+        case WX_GRAPH_HUM_CLOUDS: return "Humidity + Clouds";
+        case WX_GRAPH_PRESSURE:   return "Pressure";
+        case WX_GRAPH_WIND:       return "Wind";
+        case WX_GRAPH_PRECIP:     return "Precip 1h";
+        default:                  return "Weather";
+    }
+}
 
+static const char *wx_graph_series_label(wx_graph_mode_t mode, uint8_t series)
+{
+    switch (mode) {
+        case WX_GRAPH_TEMP:       return series ? "Feels" : "Temp";
+        case WX_GRAPH_HUM_CLOUDS: return series ? "Clouds" : "Humidity";
+        case WX_GRAPH_PRESSURE:   return series ? "Ground" : "Pressure";
+        case WX_GRAPH_WIND:       return series ? "Gust" : "Wind";
+        case WX_GRAPH_PRECIP:     return series ? "Snow" : "Rain";
+        default:                  return series ? "B" : "A";
+    }
+}
+
+static lv_color_t wx_graph_series_color(wx_graph_mode_t mode, uint8_t series)
+{
+    switch (mode) {
+        case WX_GRAPH_TEMP:       return series ? lv_color_hex(0xFF8C42) : THEME_PRIMARY_COLOR;
+        case WX_GRAPH_HUM_CLOUDS: return series ? lv_color_hex(0x9AAACD) : lv_color_hex(0x4FA8FF);
+        case WX_GRAPH_PRESSURE:   return series ? lv_color_hex(0x6EE7D8) : lv_color_hex(0x9D7BFF);
+        case WX_GRAPH_WIND:       return series ? lv_color_hex(0xFFD23F) : lv_color_hex(0x4FA8FF);
+        case WX_GRAPH_PRECIP:     return series ? lv_color_hex(0xE3F2FF) : lv_color_hex(0x4FA8FF);
+        default:                  return series ? THEME_TEXT_SECONDARY : THEME_PRIMARY_COLOR;
+    }
+}
+
+static bool wx_graph_sample_value(const weather_history_sample_t *sample,
+                                  wx_graph_mode_t mode, uint8_t series,
+                                  int32_t *out)
+{
+    if (!sample || !out) return false;
+    switch (mode) {
+        case WX_GRAPH_TEMP:
+            *out = series ? sample->feels_f : sample->temp_f;
+            return true;
+        case WX_GRAPH_HUM_CLOUDS:
+            *out = series ? sample->clouds_pct : sample->humidity_pct;
+            return true;
+        case WX_GRAPH_PRESSURE:
+            if (series) {
+                if (!sample->grnd_level_hpa) return false;
+                *out = sample->grnd_level_hpa;
+            } else {
+                uint16_t pressure = sample->sea_level_hpa ? sample->sea_level_hpa : sample->pressure_hpa;
+                if (!pressure) return false;
+                *out = pressure;
+            }
+            return true;
+        case WX_GRAPH_WIND:
+            *out = (int32_t)((series ? sample->wind_gust_mph_x10 : sample->wind_mph_x10) + 5u) / 10;
+            return true;
+        case WX_GRAPH_PRECIP:
+            *out = series ? sample->snow_1h_mm_x10 : sample->rain_1h_mm_x10;
+            return true;
+        default:
+            return false;
+    }
+}
+
+static void wx_graph_format_range(char *out, size_t out_len, wx_graph_mode_t mode,
+                                  int32_t min_value, int32_t max_value)
+{
+    if (!out || out_len == 0) return;
+    switch (mode) {
+        case WX_GRAPH_TEMP:
+            snprintf(out, out_len, "%ld° to %ld°", (long)min_value, (long)max_value);
+            break;
+        case WX_GRAPH_HUM_CLOUDS:
+            snprintf(out, out_len, "%ld%% to %ld%%", (long)min_value, (long)max_value);
+            break;
+        case WX_GRAPH_PRESSURE:
+            snprintf(out, out_len, "%ld to %ld hPa", (long)min_value, (long)max_value);
+            break;
+        case WX_GRAPH_WIND:
+            snprintf(out, out_len, "%ld to %ld mph", (long)min_value, (long)max_value);
+            break;
+        case WX_GRAPH_PRECIP:
+            snprintf(out, out_len, "%ld.%ld to %ld.%ld mm",
+                     (long)(min_value / 10), labs((long)(min_value % 10)),
+                     (long)(max_value / 10), labs((long)(max_value % 10)));
+            break;
+        default:
+            snprintf(out, out_len, "%ld to %ld", (long)min_value, (long)max_value);
+            break;
+    }
+}
+
+static void wx_history_axis_format(char *out, size_t out_len, wx_graph_mode_t mode, int32_t value)
+{
+    if (!out || out_len == 0) return;
+    switch (mode) {
+        case WX_GRAPH_TEMP:
+            snprintf(out, out_len, "%ld°", (long)value);
+            break;
+        case WX_GRAPH_HUM_CLOUDS:
+            snprintf(out, out_len, "%ld%%", (long)value);
+            break;
+        case WX_GRAPH_PRESSURE:
+            snprintf(out, out_len, "%ld", (long)value);
+            break;
+        case WX_GRAPH_WIND:
+            snprintf(out, out_len, "%ld", (long)value);
+            break;
+        case WX_GRAPH_PRECIP:
+            snprintf(out, out_len, "%ld.%ld",
+                     (long)(value / 10), labs((long)(value % 10)));
+            break;
+        default:
+            snprintf(out, out_len, "%ld", (long)value);
+            break;
+    }
+}
+
+static void wx_history_graph_view_set_chart(wx_history_graph_view_t *view,
+                                            wx_graph_mode_t mode,
+                                            int32_t axis_min,
+                                            int32_t axis_max)
+{
+    if (!view || mode >= WX_GRAPH_COUNT || !view->chart[mode] ||
+        !view->fill_series[mode][0] || !view->fill_series[mode][1] ||
+        !view->series[mode][0] || !view->series[mode][1]) return;
+    wx_history_chart_values_t *values = wx_history_values_get();
+    if (!values) return;
+    lv_chart_set_axis_range(view->chart[mode], LV_CHART_AXIS_PRIMARY_Y, axis_min, axis_max);
+    lv_chart_set_axis_range(view->chart[mode], LV_CHART_AXIS_SECONDARY_Y, axis_min, axis_max);
+    lv_chart_set_series_values(view->chart[mode], view->fill_series[mode][0],
+                               values[mode][WX_HISTORY_SERIES_FILL_A], WX_HISTORY_CHART_POINTS);
+    lv_chart_set_series_values(view->chart[mode], view->fill_series[mode][1],
+                               values[mode][WX_HISTORY_SERIES_FILL_B], WX_HISTORY_CHART_POINTS);
+    lv_chart_set_series_values(view->chart[mode], view->series[mode][0],
+                               values[mode][WX_HISTORY_SERIES_REAL_A], WX_HISTORY_CHART_POINTS);
+    lv_chart_set_series_values(view->chart[mode], view->series[mode][1],
+                               values[mode][WX_HISTORY_SERIES_REAL_B], WX_HISTORY_CHART_POINTS);
+    lv_chart_refresh(view->chart[mode]);
+}
+
+static void wx_history_fill_missing_line(wx_history_chart_values_t *values,
+                                         uint8_t real_series,
+                                         uint8_t fill_series,
+                                         const bool present[WX_HISTORY_CHART_POINTS])
+{
+    if (!values || !present || real_series >= WX_HISTORY_SERIES_COUNT || fill_series >= WX_HISTORY_SERIES_COUNT) return;
+    int prev = -1;
     for (uint8_t i = 0; i < WX_HISTORY_CHART_POINTS; i++) {
-        s_wx_history_temp_values[i] = LV_CHART_POINT_NONE;
-        s_wx_history_hum_values[i] = LV_CHART_POINT_NONE;
+        if (!present[i]) continue;
+        if (prev >= 0) {
+            uint8_t gap = (uint8_t)(i - (uint8_t)prev);
+            if (gap > 1) {
+                int32_t from = (*values)[real_series][prev];
+                int32_t to = (*values)[real_series][i];
+                int32_t delta = to - from;
+                for (uint8_t slot = (uint8_t)prev; slot <= i; slot++) {
+                    uint8_t offset = (uint8_t)(slot - (uint8_t)prev);
+                    (*values)[fill_series][slot] = from + (int32_t)((int64_t)delta * offset / gap);
+                }
+            }
+        }
+        prev = i;
+    }
+}
+
+static void wx_history_graph_view_update_labels(wx_history_graph_view_t *view,
+                                                wx_graph_mode_t mode,
+                                                uint32_t window_start_utc,
+                                                uint32_t window_mid_utc,
+                                                uint32_t window_end_utc,
+                                                int32_t tz_offset_s,
+                                                bool have_values,
+                                                int32_t axis_min,
+                                                int32_t axis_max,
+                                                bool have_a,
+                                                int32_t min_a,
+                                                int32_t max_a,
+                                                bool have_b,
+                                                int32_t min_b,
+                                                int32_t max_b)
+{
+    if (!view || mode >= WX_GRAPH_COUNT) return;
+
+    char range[36];
+    char text[64];
+    if (have_a) {
+        wx_graph_format_range(range, sizeof(range), mode, min_a, max_a);
+        snprintf(text, sizeof(text), "%s %s", wx_graph_series_label(mode, 0), range);
+    } else {
+        snprintf(text, sizeof(text), "%s —", wx_graph_series_label(mode, 0));
+    }
+    label_set_text_if_changed(view->data_a[mode], text);
+
+    if (have_b) {
+        wx_graph_format_range(range, sizeof(range), mode, min_b, max_b);
+        snprintf(text, sizeof(text), "%s %s", wx_graph_series_label(mode, 1), range);
+    } else {
+        snprintf(text, sizeof(text), "%s —", wx_graph_series_label(mode, 1));
+    }
+    label_set_text_if_changed(view->data_b[mode], text);
+
+    if (have_values) {
+        wx_history_axis_format(text, sizeof(text), mode, axis_max);
+        label_set_text_if_changed(view->axis_hi[mode], text);
+        wx_history_axis_format(text, sizeof(text), mode, axis_min);
+        label_set_text_if_changed(view->axis_lo[mode], text);
+    } else {
+        label_set_text_if_changed(view->axis_hi[mode], "—");
+        label_set_text_if_changed(view->axis_lo[mode], "—");
     }
 
-    char b[96];
+    if (window_start_utc && window_mid_utc && window_end_utc) {
+        char hm[16];
+        format_local_hm(hm, sizeof(hm), window_start_utc, tz_offset_s);
+        label_set_text_if_changed(view->time_start[mode], hm);
+        format_local_hm(hm, sizeof(hm), window_mid_utc, tz_offset_s);
+        label_set_text_if_changed(view->time_mid[mode], hm);
+        format_local_hm(hm, sizeof(hm), window_end_utc, tz_offset_s);
+        label_set_text_if_changed(view->time_end[mode], hm);
+    } else {
+        label_set_text_if_changed(view->time_start[mode], "--:--");
+        label_set_text_if_changed(view->time_mid[mode], "--:--");
+        label_set_text_if_changed(view->time_end[mode], "--:--");
+    }
+}
+
+static void wx_history_graph_view_clear(wx_history_graph_view_t *view, const char *status)
+{
+    if (!view) return;
+    wx_history_chart_values_t *values = wx_history_values_get();
+    if (!values) return;
+    for (int mode = 0; mode < WX_GRAPH_COUNT; mode++) {
+        for (uint8_t series = 0; series < WX_HISTORY_SERIES_COUNT; series++) {
+            for (uint8_t i = 0; i < WX_HISTORY_CHART_POINTS; i++) {
+                values[mode][series][i] = LV_CHART_POINT_NONE;
+            }
+        }
+        wx_history_graph_view_set_chart(view, (wx_graph_mode_t)mode, 0, 100);
+        wx_history_graph_view_update_labels(view, (wx_graph_mode_t)mode, 0, 0, 0, 0,
+                                            false, 0, 100,
+                                            false, 0, 0,
+                                            false, 0, 0);
+    }
+    label_set_text_if_changed(view->status, status ? status : "History unavailable");
+}
+
+static void wx_history_refresh(void)
+{
+    weather_history_t *history = wx_history_cache_get();
+    if (!history) {
+        wx_history_graph_view_clear(&s_wx_history_view, "History buffer unavailable");
+        return;
+    }
+    wx_history_chart_values_t *values = wx_history_values_get();
+    if (!values) {
+        wx_history_graph_view_clear(&s_wx_history_view, "History chart buffer unavailable");
+        return;
+    }
+    if (weather_history_get(history) != ESP_OK) return;
+
+    int32_t tz_offset_s = 0;
+    weather_state_t current;
+    if (weather_state_get(&current) == ESP_OK && current.valid) tz_offset_s = current.tz_offset_s;
+
     if (!history->count) {
-        lv_chart_set_series_values(s_wx_history_chart, s_wx_history_temp_series,
-                                   s_wx_history_temp_values, WX_HISTORY_CHART_POINTS);
-        lv_chart_set_series_values(s_wx_history_chart, s_wx_history_hum_series,
-                                   s_wx_history_hum_values, WX_HISTORY_CHART_POINTS);
-        lv_chart_set_axis_range(s_wx_history_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
-        lv_chart_set_axis_range(s_wx_history_chart, LV_CHART_AXIS_SECONDARY_Y, 0, 100);
-        label_set_text_if_changed(s_wx_history_summary, "No saved observations yet");
-        label_set_text_if_changed(s_wx_history_status, history->storage_detail);
+        wx_history_graph_view_clear(&s_wx_history_view, history->storage_detail);
         return;
     }
 
-    uint8_t chart_count = history->count > WX_HISTORY_CHART_POINTS ? WX_HISTORY_CHART_POINTS : history->count;
-    uint8_t start = history->count - chart_count;
-    int32_t min_temp = history->samples[start].temp_f;
-    int32_t max_temp = history->samples[start].temp_f;
-    uint8_t min_hum = history->samples[start].humidity_pct;
-    uint8_t max_hum = history->samples[start].humidity_pct;
+    uint32_t latest_utc = history->samples[history->count - 1].observed_utc;
+    uint32_t window_end_utc = latest_utc;
+    time_t now = time(NULL);
+    if (now >= (time_t)WX_HISTORY_VALID_NOW_UTC && (uint32_t)now >= latest_utc) {
+        window_end_utc = (uint32_t)now;
+    }
+    uint32_t window_start_utc = window_end_utc > WX_HISTORY_WINDOW_SECONDS ?
+                                window_end_utc - WX_HISTORY_WINDOW_SECONDS : 0;
+    uint32_t window_mid_utc = window_start_utc ?
+                              window_start_utc + WX_HISTORY_WINDOW_SECONDS / 2u : 0;
+    uint8_t window_sample_count = 0;
 
-    uint8_t dst = WX_HISTORY_CHART_POINTS - chart_count;
-    for (uint8_t i = 0; i < chart_count; i++) {
-        const weather_history_sample_t *sample = &history->samples[start + i];
-        s_wx_history_temp_values[dst + i] = sample->temp_f;
-        s_wx_history_hum_values[dst + i] = sample->humidity_pct;
-        if (sample->temp_f < min_temp) min_temp = sample->temp_f;
-        if (sample->temp_f > max_temp) max_temp = sample->temp_f;
-        if (sample->humidity_pct < min_hum) min_hum = sample->humidity_pct;
-        if (sample->humidity_pct > max_hum) max_hum = sample->humidity_pct;
+    for (uint8_t i = 0; i < history->count; i++) {
+        const uint32_t observed = history->samples[i].observed_utc;
+        if (observed >= window_start_utc && observed <= window_end_utc) window_sample_count++;
     }
 
-    int32_t axis_min = min_temp - 4;
-    int32_t axis_max = max_temp + 4;
-    if (axis_min == axis_max) axis_max = axis_min + 8;
-    lv_chart_set_axis_range(s_wx_history_chart, LV_CHART_AXIS_PRIMARY_Y, axis_min, axis_max);
-    lv_chart_set_axis_range(s_wx_history_chart, LV_CHART_AXIS_SECONDARY_Y, 0, 100);
-    lv_chart_set_series_values(s_wx_history_chart, s_wx_history_temp_series,
-                               s_wx_history_temp_values, WX_HISTORY_CHART_POINTS);
-    lv_chart_set_series_values(s_wx_history_chart, s_wx_history_hum_series,
-                               s_wx_history_hum_values, WX_HISTORY_CHART_POINTS);
-    lv_chart_refresh(s_wx_history_chart);
+    for (int mode = 0; mode < WX_GRAPH_COUNT; mode++) {
+        for (uint8_t series = 0; series < WX_HISTORY_SERIES_COUNT; series++) {
+            for (uint8_t i = 0; i < WX_HISTORY_CHART_POINTS; i++) {
+                values[mode][series][i] = LV_CHART_POINT_NONE;
+            }
+        }
+        bool present[2][WX_HISTORY_CHART_POINTS] = {0};
 
-    snprintf(b, sizeof(b), "%u saved - temp %ld° to %ld° - humidity %u%% to %u%%",
-             history->count, (long)min_temp, (long)max_temp, min_hum, max_hum);
-    label_set_text_if_changed(s_wx_history_summary, b);
-    snprintf(b, sizeof(b), "%s - %s", history->storage_detail, weather_history_file_path());
-    label_set_text_if_changed(s_wx_history_status, b);
+        bool have_values = false;
+        bool have_a = false;
+        bool have_b = false;
+        int32_t min_value = 0;
+        int32_t max_value = 0;
+        int32_t min_a = 0;
+        int32_t max_a = 0;
+        int32_t min_b = 0;
+        int32_t max_b = 0;
+
+        for (uint8_t i = 0; i < history->count; i++) {
+            const weather_history_sample_t *sample = &history->samples[i];
+            if (sample->observed_utc < window_start_utc || sample->observed_utc > window_end_utc) continue;
+            uint32_t elapsed_s = sample->observed_utc - window_start_utc;
+            uint8_t slot = (uint8_t)(elapsed_s / WX_HISTORY_SLOT_SECONDS);
+            if (slot >= WX_HISTORY_CHART_POINTS) slot = WX_HISTORY_CHART_POINTS - 1u;
+            int32_t value = 0;
+            if (wx_graph_sample_value(sample, (wx_graph_mode_t)mode, 0, &value)) {
+                values[mode][WX_HISTORY_SERIES_REAL_A][slot] = value;
+                present[0][slot] = true;
+                if (!have_values || value < min_value) min_value = value;
+                if (!have_values || value > max_value) max_value = value;
+                if (!have_a || value < min_a) min_a = value;
+                if (!have_a || value > max_a) max_a = value;
+                have_values = true;
+                have_a = true;
+            }
+            if (wx_graph_sample_value(sample, (wx_graph_mode_t)mode, 1, &value)) {
+                values[mode][WX_HISTORY_SERIES_REAL_B][slot] = value;
+                present[1][slot] = true;
+                if (!have_values || value < min_value) min_value = value;
+                if (!have_values || value > max_value) max_value = value;
+                if (!have_b || value < min_b) min_b = value;
+                if (!have_b || value > max_b) max_b = value;
+                have_values = true;
+                have_b = true;
+            }
+        }
+
+        wx_history_fill_missing_line(&values[mode], WX_HISTORY_SERIES_REAL_A,
+                                     WX_HISTORY_SERIES_FILL_A, present[0]);
+        wx_history_fill_missing_line(&values[mode], WX_HISTORY_SERIES_REAL_B,
+                                     WX_HISTORY_SERIES_FILL_B, present[1]);
+
+        int32_t axis_min = 0;
+        int32_t axis_max = 100;
+        if (mode == WX_GRAPH_HUM_CLOUDS) {
+            axis_min = 0;
+            axis_max = 100;
+        } else if (have_values) {
+            int32_t pad = 4;
+            if (mode == WX_GRAPH_PRESSURE) pad = 2;
+            else if (mode == WX_GRAPH_WIND) pad = 3;
+            else if (mode == WX_GRAPH_PRECIP) pad = 5;
+            axis_min = min_value - pad;
+            axis_max = max_value + pad;
+            if (mode == WX_GRAPH_WIND || mode == WX_GRAPH_PRECIP) axis_min = 0;
+            if (axis_min == axis_max) axis_max = axis_min + (mode == WX_GRAPH_PRESSURE ? 4 : 8);
+        }
+
+        wx_history_graph_view_set_chart(&s_wx_history_view, (wx_graph_mode_t)mode, axis_min, axis_max);
+        wx_history_graph_view_update_labels(&s_wx_history_view, (wx_graph_mode_t)mode,
+                                            window_sample_count ? window_start_utc : 0,
+                                            window_sample_count ? window_mid_utc : 0,
+                                            window_sample_count ? window_end_utc : 0,
+                                            tz_offset_s,
+                                            have_values, axis_min, axis_max,
+                                            have_a, min_a, max_a,
+                                            have_b, min_b, max_b);
+    }
+
+    char start_hm[16];
+    char end_hm[16];
+    format_local_hm(start_hm, sizeof(start_hm), window_sample_count ? window_start_utc : 0, tz_offset_s);
+    format_local_hm(end_hm, sizeof(end_hm), window_sample_count ? window_end_utc : 0, tz_offset_s);
+    char status[128];
+    if (window_sample_count) {
+        snprintf(status, sizeof(status), "%u/%u samples in last 24h: %s-%s - %s",
+                 window_sample_count, history->count, start_hm, end_hm, history->storage_detail);
+    } else {
+        snprintf(status, sizeof(status), "No samples in last 24h - %s", history->storage_detail);
+    }
+    label_set_text_if_changed(s_wx_history_view.status, status);
+}
+
+static const char *wx_forecast_graph_title(wx_forecast_graph_t mode)
+{
+    switch (mode) {
+        case WX_FC_GRAPH_PRESSURE: return "Pressure";
+        case WX_FC_GRAPH_TEMP:     return "Temperature";
+        case WX_FC_GRAPH_HUMIDITY: return "Humidity";
+        case WX_FC_GRAPH_PRECIP:   return "Rain / Snow";
+        default:                   return "Forecast";
+    }
+}
+
+static lv_color_t wx_forecast_graph_color(wx_forecast_graph_t mode)
+{
+    switch (mode) {
+        case WX_FC_GRAPH_PRESSURE: return lv_color_hex(0x9D7BFF);
+        case WX_FC_GRAPH_TEMP:     return lv_color_hex(0xFF8C42);
+        case WX_FC_GRAPH_HUMIDITY: return lv_color_hex(0x4FA8FF);
+        case WX_FC_GRAPH_PRECIP:   return lv_color_hex(0x6EE7D8);
+        default:                   return THEME_PRIMARY_COLOR;
+    }
+}
+
+static bool wx_forecast_graph_value(const weather_hour_t *hour,
+                                    wx_forecast_graph_t mode,
+                                    int32_t *out)
+{
+    if (!hour || !hour->dt_utc || !out) return false;
+    switch (mode) {
+        case WX_FC_GRAPH_PRESSURE:
+            if (!hour->pressure_hpa) return false;
+            *out = hour->pressure_hpa;
+            return true;
+        case WX_FC_GRAPH_TEMP:
+            *out = hour->temp_f;
+            return true;
+        case WX_FC_GRAPH_HUMIDITY:
+            *out = hour->humidity_pct;
+            return true;
+        case WX_FC_GRAPH_PRECIP: {
+            uint32_t mm_x10 = hour->precip_mm_x10;
+            if (!mm_x10) mm_x10 = (uint32_t)hour->rain_mm_x10 + hour->snow_mm_x10;
+            if (mm_x10 > INT32_MAX) mm_x10 = INT32_MAX;
+            *out = (int32_t)mm_x10;
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+static void wx_forecast_axis_format(char *out, size_t out_len,
+                                    wx_forecast_graph_t mode,
+                                    int32_t value)
+{
+    if (!out || out_len == 0) return;
+    switch (mode) {
+        case WX_FC_GRAPH_PRESSURE:
+            snprintf(out, out_len, "%ld", (long)value);
+            break;
+        case WX_FC_GRAPH_TEMP:
+            snprintf(out, out_len, "%ld°", (long)value);
+            break;
+        case WX_FC_GRAPH_HUMIDITY:
+            snprintf(out, out_len, "%ld%%", (long)value);
+            break;
+        case WX_FC_GRAPH_PRECIP:
+            snprintf(out, out_len, "%ld.%ld",
+                     (long)(value / 10), labs((long)(value % 10)));
+            break;
+        default:
+            snprintf(out, out_len, "%ld", (long)value);
+            break;
+    }
+}
+
+static void wx_forecast_metric_format(char *out, size_t out_len,
+                                      wx_forecast_graph_t mode,
+                                      int32_t value)
+{
+    if (!out || out_len == 0) return;
+    switch (mode) {
+        case WX_FC_GRAPH_PRESSURE:
+            snprintf(out, out_len, "%ld hPa", (long)value);
+            break;
+        case WX_FC_GRAPH_TEMP:
+            snprintf(out, out_len, "%ld°", (long)value);
+            break;
+        case WX_FC_GRAPH_HUMIDITY:
+            snprintf(out, out_len, "%ld%%", (long)value);
+            break;
+        case WX_FC_GRAPH_PRECIP:
+            snprintf(out, out_len, "%ld.%ld mm",
+                     (long)(value / 10), labs((long)(value % 10)));
+            break;
+        default:
+            snprintf(out, out_len, "%ld", (long)value);
+            break;
+    }
+}
+
+static void wx_forecast_graph_view_update_labels(wx_forecast_graph_view_t *view,
+                                                 wx_forecast_graph_t mode,
+                                                 const weather_state_t *w,
+                                                 uint8_t count,
+                                                 bool have_values,
+                                                 int32_t min_value,
+                                                 int32_t max_value,
+                                                 int32_t axis_min,
+                                                 int32_t axis_max)
+{
+    if (!view) return;
+    char text[32];
+    if (have_values) {
+        wx_forecast_metric_format(text, sizeof(text), mode, max_value);
+        char hi[40];
+        snprintf(hi, sizeof(hi), "High %s", text);
+        label_set_text_if_changed(view->data_hi[mode], hi);
+        wx_forecast_metric_format(text, sizeof(text), mode, min_value);
+        char lo[40];
+        snprintf(lo, sizeof(lo), "Low %s", text);
+        label_set_text_if_changed(view->data_lo[mode], lo);
+
+        wx_forecast_axis_format(text, sizeof(text), mode, axis_max);
+        label_set_text_if_changed(view->axis_hi[mode], text);
+        wx_forecast_axis_format(text, sizeof(text), mode, axis_min);
+        label_set_text_if_changed(view->axis_lo[mode], text);
+    } else {
+        label_set_text_if_changed(view->data_hi[mode], "High —");
+        label_set_text_if_changed(view->data_lo[mode], "Low —");
+        label_set_text_if_changed(view->axis_hi[mode], "—");
+        label_set_text_if_changed(view->axis_lo[mode], "—");
+    }
+
+    if (w && count > 0) {
+        char hm[16];
+        format_local_hm(hm, sizeof(hm), w->hours[0].dt_utc, w->tz_offset_s);
+        label_set_text_if_changed(view->time_start[mode], hm);
+        format_local_hm(hm, sizeof(hm), w->hours[count / 2].dt_utc, w->tz_offset_s);
+        label_set_text_if_changed(view->time_mid[mode], hm);
+        format_local_hm(hm, sizeof(hm), w->hours[count - 1].dt_utc, w->tz_offset_s);
+        label_set_text_if_changed(view->time_end[mode], hm);
+    } else {
+        label_set_text_if_changed(view->time_start[mode], "--:--");
+        label_set_text_if_changed(view->time_mid[mode], "--:--");
+        label_set_text_if_changed(view->time_end[mode], "--:--");
+    }
+}
+
+static void wx_forecast_graph_view_set_chart(wx_forecast_graph_view_t *view,
+                                             wx_forecast_graph_t mode,
+                                             int32_t axis_min,
+                                             int32_t axis_max)
+{
+    if (!view || !view->chart[mode] || !view->series[mode]) return;
+    wx_forecast_chart_values_t *values = wx_forecast_values_get();
+    if (!values) return;
+    lv_chart_set_axis_range(view->chart[mode], LV_CHART_AXIS_PRIMARY_Y, axis_min, axis_max);
+    lv_chart_set_series_values(view->chart[mode], view->series[mode],
+                               values[mode], WX_FORECAST_GRAPH_POINTS);
+    lv_chart_refresh(view->chart[mode]);
+}
+
+static void wx_forecast_graph_view_clear(wx_forecast_graph_view_t *view, const char *status)
+{
+    if (!view) return;
+    for (int mode = 0; mode < WX_FC_GRAPH_COUNT; mode++) {
+        wx_forecast_graph_view_set_chart(view, (wx_forecast_graph_t)mode, 0, 100);
+        wx_forecast_graph_view_update_labels(view, (wx_forecast_graph_t)mode, NULL, 0, false, 0, 0, 0, 100);
+    }
+    label_set_text_if_changed(view->status, status ? status : "Forecast graphs unavailable");
+}
+
+static void wx_forecast_graphs_clear(const char *status)
+{
+    wx_forecast_chart_values_t *values = wx_forecast_values_get();
+    if (!values) return;
+    for (int mode = 0; mode < WX_FC_GRAPH_COUNT; mode++) {
+        for (uint8_t i = 0; i < WX_FORECAST_GRAPH_POINTS; i++) {
+            values[mode][i] = LV_CHART_POINT_NONE;
+        }
+    }
+    wx_forecast_graph_view_clear(&s_wx_fc_view, status);
+    wx_forecast_graph_view_clear(&s_idle_fc_view, status);
+}
+
+static void wx_forecast_graphs_refresh(const weather_state_t *w)
+{
+    if (!w || !w->valid || !w->hour_count) {
+        wx_forecast_graphs_clear("Hourly forecast unavailable");
+        return;
+    }
+    wx_forecast_chart_values_t *values = wx_forecast_values_get();
+    if (!values) {
+        wx_forecast_graphs_clear("Forecast chart buffer unavailable");
+        return;
+    }
+
+    for (int mode = 0; mode < WX_FC_GRAPH_COUNT; mode++) {
+        bool have_values = false;
+        int32_t min_value = 0;
+        int32_t max_value = 0;
+        for (uint8_t i = 0; i < WX_FORECAST_GRAPH_POINTS; i++) {
+            values[mode][i] = LV_CHART_POINT_NONE;
+        }
+
+        uint8_t count = w->hour_count > WX_FORECAST_GRAPH_POINTS ? WX_FORECAST_GRAPH_POINTS : w->hour_count;
+        for (uint8_t i = 0; i < count; i++) {
+            int32_t value = 0;
+            if (!wx_forecast_graph_value(&w->hours[i], (wx_forecast_graph_t)mode, &value)) continue;
+            values[mode][i] = value;
+            if (!have_values || value < min_value) min_value = value;
+            if (!have_values || value > max_value) max_value = value;
+            have_values = true;
+        }
+
+        int32_t axis_min = 0;
+        int32_t axis_max = 100;
+        if (mode == WX_FC_GRAPH_HUMIDITY) {
+            axis_min = 0;
+            axis_max = 100;
+        } else if (have_values) {
+            int32_t pad = 4;
+            if (mode == WX_FC_GRAPH_PRESSURE) pad = 2;
+            else if (mode == WX_FC_GRAPH_PRECIP) pad = 5;
+            axis_min = min_value - pad;
+            axis_max = max_value + pad;
+            if (mode == WX_FC_GRAPH_PRECIP) axis_min = 0;
+            if (axis_min == axis_max) axis_max = axis_min + (mode == WX_FC_GRAPH_PRESSURE ? 4 : 8);
+        }
+
+        wx_forecast_graph_view_set_chart(&s_wx_fc_view, (wx_forecast_graph_t)mode, axis_min, axis_max);
+        wx_forecast_graph_view_set_chart(&s_idle_fc_view, (wx_forecast_graph_t)mode, axis_min, axis_max);
+        wx_forecast_graph_view_update_labels(&s_wx_fc_view, (wx_forecast_graph_t)mode, w, count,
+                                             have_values, min_value, max_value, axis_min, axis_max);
+        wx_forecast_graph_view_update_labels(&s_idle_fc_view, (wx_forecast_graph_t)mode, w, count,
+                                             have_values, min_value, max_value, axis_min, axis_max);
+    }
+
+    char start[16];
+    char end[16];
+    format_local_hm(start, sizeof(start), w->hours[0].dt_utc, w->tz_offset_s);
+    format_local_hm(end, sizeof(end), w->hours[w->hour_count - 1].dt_utc, w->tz_offset_s);
+    char status[72];
+    snprintf(status, sizeof(status), "Next %u hours: %s-%s", w->hour_count, start, end);
+    label_set_text_if_changed(s_wx_fc_view.status, status);
+    label_set_text_if_changed(s_idle_fc_view.status, status);
 }
 
 static void weather_refresh(lv_timer_t *t)
@@ -1884,7 +2658,9 @@ static void weather_refresh(lv_timer_t *t)
             label_set_text_if_changed(s_wx_day_icon[i], WI_NA);
             label_set_text_if_changed(s_wx_day_temp[i], "—/—");
             label_set_text_if_changed(s_wx_day_pop[i], "");
+            label_set_text_if_changed(s_wx_day_cond[i], "");
         }
+        wx_forecast_graphs_clear("Waiting for hourly forecast");
         wx_history_refresh();
         return;
     }
@@ -1986,6 +2762,7 @@ static void weather_refresh(lv_timer_t *t)
                                         weather_color(w.days[i].condition), LV_PART_MAIN);
             snprintf(b, sizeof(b), "%d° / %d°", w.days[i].hi_f, w.days[i].lo_f);
             label_set_text_if_changed(s_wx_day_temp[i], b);
+            label_set_text_if_changed(s_wx_day_cond[i], w.days[i].condition);
             if (w.days[i].pop_pct > 0) {
                 snprintf(b, sizeof(b), LV_SYMBOL_DOWNLOAD " %u%%", w.days[i].pop_pct);
             } else b[0] = '\0';
@@ -1995,8 +2772,10 @@ static void weather_refresh(lv_timer_t *t)
             label_set_text_if_changed(s_wx_day_icon[i], WI_NA);
             label_set_text_if_changed(s_wx_day_temp[i], "—/—");
             label_set_text_if_changed(s_wx_day_pop[i], "");
+            label_set_text_if_changed(s_wx_day_cond[i], "");
         }
     }
+    wx_forecast_graphs_refresh(&w);
 
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     uint32_t age_s  = (now_ms - w.fetched_at_ms) / 1000;
@@ -2071,6 +2850,403 @@ static void wx_card_header(lv_obj_t *parent, const char *icon, const char *text,
     lv_label_set_text(t, text);
     lv_obj_set_style_text_color(t, THEME_TEXT_SECONDARY, LV_PART_MAIN);
     lv_obj_set_style_text_font(t, THEME_FONT_LABEL, LV_PART_MAIN);
+}
+
+static void wx_daily_forecast_card_create(lv_obj_t *parent)
+{
+    lv_obj_t *fc_card = deep_card(parent);
+    lv_obj_set_size(fc_card, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(fc_card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(fc_card, 8, LV_PART_MAIN);
+    wx_card_header(fc_card, LV_SYMBOL_REFRESH, "DAILY FORECAST", THEME_PRIMARY_COLOR);
+
+    lv_obj_t *days = lv_obj_create(fc_card);
+    lv_obj_remove_style_all(days);
+    lv_obj_set_size(days, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(days, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(days, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(days, LV_OBJ_FLAG_SCROLLABLE);
+
+    for (int i = 0; i < WX_FORECAST_SLOTS; i++) {
+        lv_obj_t *day = lv_obj_create(days);
+        lv_obj_remove_style_all(day);
+        lv_obj_set_size(day, 120, 148);
+        lv_obj_set_style_bg_color(day, lv_color_hex(0x0E1326), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(day, LV_OPA_70, LV_PART_MAIN);
+        lv_obj_set_style_radius(day, 8, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(day, 8, LV_PART_MAIN);
+        lv_obj_set_flex_flow(day, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(day, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_row(day, 3, LV_PART_MAIN);
+        lv_obj_clear_flag(day, LV_OBJ_FLAG_SCROLLABLE);
+
+        s_wx_day_name[i] = lv_label_create(day);
+        lv_label_set_text(s_wx_day_name[i], "---");
+        lv_obj_set_style_text_color(s_wx_day_name[i], THEME_TEXT_SECONDARY, LV_PART_MAIN);
+        lv_obj_set_style_text_font(s_wx_day_name[i], THEME_FONT_LABEL, LV_PART_MAIN);
+
+        s_wx_day_icon[i] = lv_label_create(day);
+        lv_label_set_text(s_wx_day_icon[i], WI_NA);
+        lv_obj_set_style_text_color(s_wx_day_icon[i], THEME_PRIMARY_COLOR, LV_PART_MAIN);
+        lv_obj_set_style_text_font(s_wx_day_icon[i], THEME_FONT_WX_SMALL, LV_PART_MAIN);
+
+        s_wx_day_temp[i] = lv_label_create(day);
+        lv_label_set_text(s_wx_day_temp[i], "—/—");
+        lv_obj_set_width(s_wx_day_temp[i], LV_PCT(100));
+        lv_label_set_long_mode(s_wx_day_temp[i], LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(s_wx_day_temp[i], LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_style_text_color(s_wx_day_temp[i], THEME_TEXT_PRIMARY, LV_PART_MAIN);
+        lv_obj_set_style_text_font(s_wx_day_temp[i], THEME_FONT_BODY, LV_PART_MAIN);
+
+        s_wx_day_cond[i] = lv_label_create(day);
+        lv_label_set_text(s_wx_day_cond[i], "");
+        lv_obj_set_width(s_wx_day_cond[i], LV_PCT(100));
+        lv_label_set_long_mode(s_wx_day_cond[i], LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(s_wx_day_cond[i], LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_style_text_color(s_wx_day_cond[i], THEME_TEXT_MUTED, LV_PART_MAIN);
+        lv_obj_set_style_text_font(s_wx_day_cond[i], THEME_FONT_SMALL, LV_PART_MAIN);
+
+        s_wx_day_pop[i] = lv_label_create(day);
+        lv_label_set_text(s_wx_day_pop[i], "");
+        lv_obj_set_width(s_wx_day_pop[i], LV_PCT(100));
+        lv_label_set_long_mode(s_wx_day_pop[i], LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(s_wx_day_pop[i], LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_style_text_color(s_wx_day_pop[i], lv_color_hex(0x4FA8FF), LV_PART_MAIN);
+        lv_obj_set_style_text_font(s_wx_day_pop[i], THEME_FONT_SMALL, LV_PART_MAIN);
+    }
+
+    s_wx_age = lv_label_create(fc_card);
+    lv_label_set_text(s_wx_age, "Waiting for first fetch...");
+    lv_obj_set_width(s_wx_age, LV_PCT(100));
+    lv_obj_set_style_text_align(s_wx_age, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_wx_age, THEME_FONT_SMALL, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_wx_age, THEME_TEXT_MUTED, LV_PART_MAIN);
+}
+
+static void wx_forecast_graph_slide_create(lv_obj_t *carousel,
+                                           wx_forecast_graph_view_t *view,
+                                           wx_forecast_graph_t mode,
+                                           lv_coord_t slide_h,
+                                           lv_coord_t chart_h)
+{
+    lv_obj_t *slide = lv_obj_create(carousel);
+    lv_obj_remove_style_all(slide);
+    lv_obj_set_size(slide, LV_PCT(100), slide_h);
+    lv_obj_set_flex_flow(slide, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_hor(slide, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(slide, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(slide, 6, LV_PART_MAIN);
+    lv_obj_clear_flag(slide, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *top = lv_obj_create(slide);
+    lv_obj_remove_style_all(top);
+    lv_obj_set_size(top, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(top, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(top, 10, LV_PART_MAIN);
+    lv_obj_clear_flag(top, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(top);
+    lv_label_set_text(title, wx_forecast_graph_title(mode));
+    lv_obj_set_width(title, 1);
+    lv_obj_set_flex_grow(title, 1);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(title, wx_forecast_graph_color(mode), LV_PART_MAIN);
+    lv_obj_set_style_text_font(title, THEME_FONT_BODY, LV_PART_MAIN);
+
+    view->data_hi[mode] = lv_label_create(top);
+    lv_label_set_text(view->data_hi[mode], "High —");
+    lv_obj_set_width(view->data_hi[mode], 120);
+    lv_label_set_long_mode(view->data_hi[mode], LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(view->data_hi[mode], LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(view->data_hi[mode], THEME_TEXT_PRIMARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(view->data_hi[mode], THEME_FONT_SMALL, LV_PART_MAIN);
+
+    view->data_lo[mode] = lv_label_create(top);
+    lv_label_set_text(view->data_lo[mode], "Low —");
+    lv_obj_set_width(view->data_lo[mode], 116);
+    lv_label_set_long_mode(view->data_lo[mode], LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(view->data_lo[mode], LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(view->data_lo[mode], THEME_TEXT_SECONDARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(view->data_lo[mode], THEME_FONT_SMALL, LV_PART_MAIN);
+
+    lv_obj_t *graph_row = lv_obj_create(slide);
+    lv_obj_remove_style_all(graph_row);
+    lv_obj_set_size(graph_row, LV_PCT(100), chart_h);
+    lv_obj_set_flex_flow(graph_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(graph_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(graph_row, 8, LV_PART_MAIN);
+    lv_obj_clear_flag(graph_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *chart = lv_chart_create(graph_row);
+    lv_obj_set_size(chart, 1, chart_h);
+    lv_obj_set_flex_grow(chart, 1);
+    lv_obj_set_style_bg_opa(chart, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(chart, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(chart, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_left(chart, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(chart, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(chart, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(chart, 4, LV_PART_MAIN);
+    lv_obj_set_style_line_width(chart, 5, LV_PART_ITEMS);
+    lv_obj_set_style_size(chart, 0, 0, LV_PART_INDICATOR);
+    lv_chart_set_type(chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(chart, WX_FORECAST_GRAPH_POINTS);
+    lv_chart_set_div_line_count(chart, 0, 0);
+    lv_chart_set_axis_range(chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+    view->series[mode] = lv_chart_add_series(chart, wx_forecast_graph_color(mode), LV_CHART_AXIS_PRIMARY_Y);
+    view->chart[mode] = chart;
+
+    lv_obj_t *axis = lv_obj_create(graph_row);
+    lv_obj_remove_style_all(axis);
+    lv_obj_set_size(axis, 44, LV_PCT(100));
+    lv_obj_set_flex_flow(axis, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(axis, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
+    lv_obj_clear_flag(axis, LV_OBJ_FLAG_SCROLLABLE);
+
+    view->axis_hi[mode] = lv_label_create(axis);
+    lv_label_set_text(view->axis_hi[mode], "—");
+    lv_obj_set_width(view->axis_hi[mode], LV_PCT(100));
+    lv_label_set_long_mode(view->axis_hi[mode], LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(view->axis_hi[mode], LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(view->axis_hi[mode], THEME_TEXT_SECONDARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(view->axis_hi[mode], THEME_FONT_SMALL, LV_PART_MAIN);
+
+    view->axis_lo[mode] = lv_label_create(axis);
+    lv_label_set_text(view->axis_lo[mode], "—");
+    lv_obj_set_width(view->axis_lo[mode], LV_PCT(100));
+    lv_label_set_long_mode(view->axis_lo[mode], LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(view->axis_lo[mode], LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(view->axis_lo[mode], THEME_TEXT_MUTED, LV_PART_MAIN);
+    lv_obj_set_style_text_font(view->axis_lo[mode], THEME_FONT_SMALL, LV_PART_MAIN);
+
+    lv_obj_t *time_row = lv_obj_create(slide);
+    lv_obj_remove_style_all(time_row);
+    lv_obj_set_size(time_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(time_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(time_row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_right(time_row, 52, LV_PART_MAIN);
+    lv_obj_clear_flag(time_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    view->time_start[mode] = lv_label_create(time_row);
+    view->time_mid[mode] = lv_label_create(time_row);
+    view->time_end[mode] = lv_label_create(time_row);
+    lv_obj_t *time_labels[3] = {view->time_start[mode], view->time_mid[mode], view->time_end[mode]};
+    for (int i = 0; i < 3; i++) {
+        lv_label_set_text(time_labels[i], "--:--");
+        lv_obj_set_width(time_labels[i], 72);
+        lv_label_set_long_mode(time_labels[i], LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(time_labels[i], i == 0 ? LV_TEXT_ALIGN_LEFT : (i == 1 ? LV_TEXT_ALIGN_CENTER : LV_TEXT_ALIGN_RIGHT), LV_PART_MAIN);
+        lv_obj_set_style_text_color(time_labels[i], THEME_TEXT_MUTED, LV_PART_MAIN);
+        lv_obj_set_style_text_font(time_labels[i], THEME_FONT_SMALL, LV_PART_MAIN);
+    }
+}
+
+static lv_obj_t *wx_forecast_graphs_carousel_create(lv_obj_t *parent,
+                                                    wx_forecast_graph_view_t *view,
+                                                    lv_coord_t carousel_h,
+                                                    lv_coord_t chart_h)
+{
+    if (!view) return NULL;
+    memset(view, 0, sizeof(*view));
+
+    lv_obj_t *carousel = lv_obj_create(parent);
+    lv_obj_remove_style_all(carousel);
+    lv_obj_set_size(carousel, LV_PCT(100), carousel_h);
+    lv_obj_set_flex_flow(carousel, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(carousel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_column(carousel, 0, LV_PART_MAIN);
+    lv_obj_set_scroll_dir(carousel, LV_DIR_HOR);
+    lv_obj_set_scroll_snap_x(carousel, LV_SCROLL_SNAP_CENTER);
+    lv_obj_set_scrollbar_mode(carousel, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_add_flag(carousel, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_SCROLL_ONE);
+    wx_carousel_attach_manual_pause(carousel);
+    view->carousel = carousel;
+
+    lv_coord_t slide_h = carousel_h - 2;
+    for (int mode = 0; mode < WX_FC_GRAPH_COUNT; mode++) {
+        wx_forecast_graph_slide_create(carousel, view, (wx_forecast_graph_t)mode, slide_h, chart_h);
+    }
+    return carousel;
+}
+
+static void wx_forecast_graphs_status_create(lv_obj_t *parent, wx_forecast_graph_view_t *view)
+{
+    if (!view) return;
+    view->status = lv_label_create(parent);
+    lv_label_set_text(view->status, "Waiting for hourly forecast");
+    lv_obj_set_width(view->status, LV_PCT(100));
+    lv_label_set_long_mode(view->status, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(view->status, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_color(view->status, THEME_TEXT_MUTED, LV_PART_MAIN);
+    lv_obj_set_style_text_font(view->status, THEME_FONT_SMALL, LV_PART_MAIN);
+}
+
+static void wx_forecast_graphs_card_create(lv_obj_t *parent)
+{
+    lv_obj_t *graph_card = deep_card(parent);
+    lv_obj_set_size(graph_card, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(graph_card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(graph_card, 8, LV_PART_MAIN);
+    wx_card_header(graph_card, LV_SYMBOL_LIST, "24-HOUR FORECAST GRAPHS", THEME_PRIMARY_COLOR);
+    wx_forecast_graphs_carousel_create(graph_card, &s_wx_fc_view, 230, 162);
+    wx_forecast_graphs_status_create(graph_card, &s_wx_fc_view);
+}
+
+static void wx_history_graph_slide_create(lv_obj_t *carousel,
+                                          wx_history_graph_view_t *view,
+                                          wx_graph_mode_t mode,
+                                          lv_coord_t slide_h,
+                                          lv_coord_t chart_h)
+{
+    lv_obj_t *slide = lv_obj_create(carousel);
+    lv_obj_remove_style_all(slide);
+    lv_obj_set_size(slide, LV_PCT(100), slide_h);
+    lv_obj_set_flex_flow(slide, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_hor(slide, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(slide, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(slide, 6, LV_PART_MAIN);
+    lv_obj_clear_flag(slide, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *top = lv_obj_create(slide);
+    lv_obj_remove_style_all(top);
+    lv_obj_set_size(top, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(top, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(top, 10, LV_PART_MAIN);
+    lv_obj_clear_flag(top, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(top);
+    lv_label_set_text(title, wx_graph_title(mode));
+    lv_obj_set_width(title, 1);
+    lv_obj_set_flex_grow(title, 1);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(title, wx_graph_series_color(mode, 0), LV_PART_MAIN);
+    lv_obj_set_style_text_font(title, THEME_FONT_BODY, LV_PART_MAIN);
+
+    view->data_a[mode] = lv_label_create(top);
+    lv_label_set_text(view->data_a[mode], "A —");
+    lv_obj_set_width(view->data_a[mode], 176);
+    lv_label_set_long_mode(view->data_a[mode], LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(view->data_a[mode], LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(view->data_a[mode], wx_graph_series_color(mode, 0), LV_PART_MAIN);
+    lv_obj_set_style_text_font(view->data_a[mode], THEME_FONT_SMALL, LV_PART_MAIN);
+
+    view->data_b[mode] = lv_label_create(top);
+    lv_label_set_text(view->data_b[mode], "B —");
+    lv_obj_set_width(view->data_b[mode], 176);
+    lv_label_set_long_mode(view->data_b[mode], LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(view->data_b[mode], LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(view->data_b[mode], wx_graph_series_color(mode, 1), LV_PART_MAIN);
+    lv_obj_set_style_text_font(view->data_b[mode], THEME_FONT_SMALL, LV_PART_MAIN);
+
+    lv_obj_t *graph_row = lv_obj_create(slide);
+    lv_obj_remove_style_all(graph_row);
+    lv_obj_set_size(graph_row, LV_PCT(100), chart_h);
+    lv_obj_set_flex_flow(graph_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(graph_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(graph_row, 8, LV_PART_MAIN);
+    lv_obj_clear_flag(graph_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *chart = lv_chart_create(graph_row);
+    lv_obj_set_size(chart, 1, chart_h);
+    lv_obj_set_flex_grow(chart, 1);
+    lv_obj_set_style_bg_opa(chart, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(chart, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(chart, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_left(chart, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(chart, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(chart, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(chart, 4, LV_PART_MAIN);
+    lv_obj_set_style_line_width(chart, 5, LV_PART_ITEMS);
+    lv_obj_set_style_size(chart, 0, 0, LV_PART_INDICATOR);
+    lv_chart_set_type(chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(chart, WX_HISTORY_CHART_POINTS);
+    lv_chart_set_div_line_count(chart, 0, 0);
+    lv_chart_set_axis_range(chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+    view->fill_series[mode][0] = lv_chart_add_series(chart, THEME_TEXT_MUTED, LV_CHART_AXIS_PRIMARY_Y);
+    view->fill_series[mode][1] = lv_chart_add_series(chart, THEME_TEXT_MUTED, LV_CHART_AXIS_PRIMARY_Y);
+    view->series[mode][0] = lv_chart_add_series(chart, wx_graph_series_color(mode, 0), LV_CHART_AXIS_PRIMARY_Y);
+    view->series[mode][1] = lv_chart_add_series(chart, wx_graph_series_color(mode, 1), LV_CHART_AXIS_PRIMARY_Y);
+    view->chart[mode] = chart;
+
+    lv_obj_t *axis = lv_obj_create(graph_row);
+    lv_obj_remove_style_all(axis);
+    lv_obj_set_size(axis, 44, LV_PCT(100));
+    lv_obj_set_flex_flow(axis, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(axis, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
+    lv_obj_clear_flag(axis, LV_OBJ_FLAG_SCROLLABLE);
+
+    view->axis_hi[mode] = lv_label_create(axis);
+    lv_label_set_text(view->axis_hi[mode], "—");
+    lv_obj_set_width(view->axis_hi[mode], LV_PCT(100));
+    lv_label_set_long_mode(view->axis_hi[mode], LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(view->axis_hi[mode], LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(view->axis_hi[mode], THEME_TEXT_SECONDARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(view->axis_hi[mode], THEME_FONT_SMALL, LV_PART_MAIN);
+
+    view->axis_lo[mode] = lv_label_create(axis);
+    lv_label_set_text(view->axis_lo[mode], "—");
+    lv_obj_set_width(view->axis_lo[mode], LV_PCT(100));
+    lv_label_set_long_mode(view->axis_lo[mode], LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(view->axis_lo[mode], LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(view->axis_lo[mode], THEME_TEXT_MUTED, LV_PART_MAIN);
+    lv_obj_set_style_text_font(view->axis_lo[mode], THEME_FONT_SMALL, LV_PART_MAIN);
+
+    lv_obj_t *time_row = lv_obj_create(slide);
+    lv_obj_remove_style_all(time_row);
+    lv_obj_set_size(time_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(time_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(time_row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_right(time_row, 52, LV_PART_MAIN);
+    lv_obj_clear_flag(time_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    view->time_start[mode] = lv_label_create(time_row);
+    view->time_mid[mode] = lv_label_create(time_row);
+    view->time_end[mode] = lv_label_create(time_row);
+    lv_obj_t *time_labels[3] = {view->time_start[mode], view->time_mid[mode], view->time_end[mode]};
+    for (int i = 0; i < 3; i++) {
+        lv_label_set_text(time_labels[i], "--:--");
+        lv_obj_set_width(time_labels[i], 72);
+        lv_label_set_long_mode(time_labels[i], LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(time_labels[i], i == 0 ? LV_TEXT_ALIGN_LEFT : (i == 1 ? LV_TEXT_ALIGN_CENTER : LV_TEXT_ALIGN_RIGHT), LV_PART_MAIN);
+        lv_obj_set_style_text_color(time_labels[i], THEME_TEXT_MUTED, LV_PART_MAIN);
+        lv_obj_set_style_text_font(time_labels[i], THEME_FONT_SMALL, LV_PART_MAIN);
+    }
+}
+
+static lv_obj_t *wx_history_graphs_carousel_create(lv_obj_t *parent,
+                                                   wx_history_graph_view_t *view,
+                                                   lv_coord_t carousel_h,
+                                                   lv_coord_t chart_h)
+{
+    if (!view) return NULL;
+    memset(view, 0, sizeof(*view));
+
+    lv_obj_t *carousel = lv_obj_create(parent);
+    lv_obj_remove_style_all(carousel);
+    lv_obj_set_size(carousel, LV_PCT(100), carousel_h);
+    lv_obj_set_flex_flow(carousel, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(carousel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_column(carousel, 0, LV_PART_MAIN);
+    lv_obj_set_scroll_dir(carousel, LV_DIR_HOR);
+    lv_obj_set_scroll_snap_x(carousel, LV_SCROLL_SNAP_CENTER);
+    lv_obj_set_scrollbar_mode(carousel, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_add_flag(carousel, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_SCROLL_ONE);
+    wx_carousel_attach_manual_pause(carousel);
+    view->carousel = carousel;
+
+    lv_coord_t slide_h = carousel_h - 2;
+    for (int mode = 0; mode < WX_GRAPH_COUNT; mode++) {
+        wx_history_graph_slide_create(carousel, view, (wx_graph_mode_t)mode, slide_h, chart_h);
+    }
+    return carousel;
 }
 
 static void pull_refresh_weather(void)
@@ -2317,6 +3493,9 @@ lv_obj_t *screen_weather_create(lv_obj_t *parent)
     lv_obj_set_style_text_color(s_wx_wind_degree, THEME_TEXT_MUTED, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_wx_wind_degree, THEME_FONT_SMALL, LV_PART_MAIN);
 
+    wx_daily_forecast_card_create(p);
+    wx_forecast_graphs_card_create(p);
+
     /* ===== Details card: 3-col tile grid ===== */
     lv_obj_t *details = deep_card(p);
     lv_obj_set_size(details, LV_PCT(100), LV_SIZE_CONTENT);
@@ -2351,113 +3530,11 @@ lv_obj_t *screen_weather_create(lv_obj_t *parent)
     lv_obj_set_flex_flow(history_card, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(history_card, 8, LV_PART_MAIN);
     wx_card_header(history_card, LV_SYMBOL_LIST, "SAVED HISTORY", THEME_PRIMARY_COLOR);
-
-    s_wx_history_chart = lv_chart_create(history_card);
-    lv_obj_set_size(s_wx_history_chart, LV_PCT(100), 150);
-    lv_obj_set_style_bg_color(s_wx_history_chart, lv_color_hex(0x0B1020), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_wx_history_chart, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_width(s_wx_history_chart, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(s_wx_history_chart, 8, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(s_wx_history_chart, 10, LV_PART_MAIN);
-    lv_obj_set_style_line_width(s_wx_history_chart, 3, LV_PART_ITEMS);
-    lv_obj_set_style_size(s_wx_history_chart, 0, 0, LV_PART_INDICATOR);
-    lv_chart_set_type(s_wx_history_chart, LV_CHART_TYPE_LINE);
-    lv_chart_set_point_count(s_wx_history_chart, WX_HISTORY_CHART_POINTS);
-    lv_chart_set_div_line_count(s_wx_history_chart, 4, 6);
-    lv_chart_set_axis_range(s_wx_history_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
-    lv_chart_set_axis_range(s_wx_history_chart, LV_CHART_AXIS_SECONDARY_Y, 0, 100);
-    s_wx_history_temp_series = lv_chart_add_series(s_wx_history_chart, THEME_PRIMARY_COLOR, LV_CHART_AXIS_PRIMARY_Y);
-    s_wx_history_hum_series = lv_chart_add_series(s_wx_history_chart, lv_color_hex(0x4FA8FF), LV_CHART_AXIS_SECONDARY_Y);
-
-    lv_obj_t *legend = lv_obj_create(history_card);
-    lv_obj_remove_style_all(legend);
-    lv_obj_set_size(legend, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(legend, LV_FLEX_FLOW_ROW);
-    lv_obj_set_style_pad_column(legend, 12, LV_PART_MAIN);
-    lv_obj_clear_flag(legend, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *temp_legend = lv_label_create(legend);
-    lv_label_set_text(temp_legend, "Temp");
-    lv_obj_set_style_text_color(temp_legend, THEME_PRIMARY_COLOR, LV_PART_MAIN);
-    lv_obj_set_style_text_font(temp_legend, THEME_FONT_SMALL, LV_PART_MAIN);
-
-    lv_obj_t *hum_legend = lv_label_create(legend);
-    lv_label_set_text(hum_legend, "Humidity");
-    lv_obj_set_style_text_color(hum_legend, lv_color_hex(0x4FA8FF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(hum_legend, THEME_FONT_SMALL, LV_PART_MAIN);
-
-    s_wx_history_summary = lv_label_create(history_card);
-    lv_label_set_text(s_wx_history_summary, "No saved observations yet");
-    lv_obj_set_width(s_wx_history_summary, LV_PCT(100));
-    lv_label_set_long_mode(s_wx_history_summary, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_color(s_wx_history_summary, THEME_TEXT_SECONDARY, LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_wx_history_summary, THEME_FONT_LABEL, LV_PART_MAIN);
-
-    s_wx_history_status = lv_label_create(history_card);
-    lv_label_set_text(s_wx_history_status, "History not loaded");
-    lv_obj_set_width(s_wx_history_status, LV_PCT(100));
-    lv_label_set_long_mode(s_wx_history_status, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_color(s_wx_history_status, THEME_TEXT_MUTED, LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_wx_history_status, THEME_FONT_SMALL, LV_PART_MAIN);
-
-    /* ===== Forecast card ===== */
-    lv_obj_t *fc_card = deep_card(p);
-    lv_obj_set_size(fc_card, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(fc_card, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(fc_card, 6, LV_PART_MAIN);
-    wx_card_header(fc_card, LV_SYMBOL_REFRESH, "5-DAY FORECAST", THEME_PRIMARY_COLOR);
-
-    lv_obj_t *days = lv_obj_create(fc_card);
-    lv_obj_remove_style_all(days);
-    lv_obj_set_size(days, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(days, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(days, LV_FLEX_ALIGN_SPACE_BETWEEN,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_clear_flag(days, LV_OBJ_FLAG_SCROLLABLE);
-
-    for (int i = 0; i < WX_FORECAST_SLOTS; i++) {
-        lv_obj_t *day = lv_obj_create(days);
-        lv_obj_remove_style_all(day);
-        lv_obj_set_size(day, 116, 130);
-        lv_obj_set_style_bg_color(day, lv_color_hex(0x0E1326), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(day, LV_OPA_70, LV_PART_MAIN);
-        lv_obj_set_style_radius(day, 10, LV_PART_MAIN);
-        lv_obj_set_style_pad_all(day, 8, LV_PART_MAIN);
-        lv_obj_set_flex_flow(day, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_flex_align(day, LV_FLEX_ALIGN_CENTER,
-                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_pad_row(day, 4, LV_PART_MAIN);
-        lv_obj_clear_flag(day, LV_OBJ_FLAG_SCROLLABLE);
-
-        s_wx_day_name[i] = lv_label_create(day);
-        lv_label_set_text(s_wx_day_name[i], "---");
-        lv_obj_set_style_text_color(s_wx_day_name[i], THEME_TEXT_SECONDARY, LV_PART_MAIN);
-        lv_obj_set_style_text_font(s_wx_day_name[i], THEME_FONT_LABEL, LV_PART_MAIN);
-
-        s_wx_day_icon[i] = lv_label_create(day);
-        lv_label_set_text(s_wx_day_icon[i], WI_NA);
-        lv_obj_set_style_text_color(s_wx_day_icon[i], THEME_PRIMARY_COLOR, LV_PART_MAIN);
-        lv_obj_set_style_text_font(s_wx_day_icon[i], THEME_FONT_WX_SMALL, LV_PART_MAIN);
-
-        s_wx_day_temp[i] = lv_label_create(day);
-        lv_label_set_text(s_wx_day_temp[i], "—/—");
-        lv_obj_set_style_text_color(s_wx_day_temp[i], THEME_TEXT_PRIMARY, LV_PART_MAIN);
-        lv_obj_set_style_text_font(s_wx_day_temp[i], THEME_FONT_BODY, LV_PART_MAIN);
-
-        s_wx_day_pop[i] = lv_label_create(day);
-        lv_label_set_text(s_wx_day_pop[i], "");
-        lv_obj_set_style_text_color(s_wx_day_pop[i], lv_color_hex(0x4FA8FF), LV_PART_MAIN);
-        lv_obj_set_style_text_font(s_wx_day_pop[i], THEME_FONT_SMALL, LV_PART_MAIN);
-    }
-
-    s_wx_age = lv_label_create(fc_card);
-    lv_label_set_text(s_wx_age, "Waiting for first fetch…");
-    lv_obj_set_width(s_wx_age, LV_PCT(100));
-    lv_obj_set_style_text_align(s_wx_age, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_wx_age, THEME_FONT_SMALL, LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_wx_age, THEME_TEXT_MUTED, LV_PART_MAIN);
+    wx_history_graphs_carousel_create(history_card, &s_wx_history_view, 230, 162);
 
     s_weather_refresh_timer = lv_timer_create(weather_refresh, weather_page_update_period_ms(), NULL);
+    if (!s_wx_fc_cycle_timer) s_wx_fc_cycle_timer = lv_timer_create(weather_graph_cycle_cb, weather_graph_cycle_period_ms(), NULL);
+    else weather_graph_cycle_timer_apply();
     weather_refresh(NULL);
 
     /* Pull-to-refresh: force an immediate weather data fetch */
@@ -2471,6 +3548,9 @@ lv_obj_t *screen_weather_create(lv_obj_t *parent)
 
 static lv_obj_t *s_info_uptime;
 static lv_obj_t *s_info_heap;
+static lv_obj_t *s_info_cpu;
+static lv_obj_t *s_info_internal_ram;
+static lv_obj_t *s_info_psram;
 static lv_obj_t *s_info_wifi;
 static lv_obj_t *s_info_ip;
 static lv_obj_t *s_info_area;
@@ -2481,6 +3561,23 @@ static lv_obj_t *s_info_wled;
 static lv_obj_t *s_info_weather;
 static lv_obj_t *s_info_audio;
 static lv_obj_t *s_info_panel_root;
+
+#if defined(CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS) && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS && \
+    defined(CONFIG_FREERTOS_USE_TRACE_FACILITY) && CONFIG_FREERTOS_USE_TRACE_FACILITY
+#define INFO_CPU_TASK_MAX 48
+static TaskStatus_t *s_info_cpu_tasks;
+static configRUN_TIME_COUNTER_TYPE s_info_cpu_prev_total;
+static configRUN_TIME_COUNTER_TYPE s_info_cpu_prev_idle;
+static bool s_info_cpu_have_prev;
+
+static TaskStatus_t *info_cpu_tasks_get(void)
+{
+    if (s_info_cpu_tasks) return s_info_cpu_tasks;
+    s_info_cpu_tasks = heap_caps_calloc(INFO_CPU_TASK_MAX, sizeof(*s_info_cpu_tasks),
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return s_info_cpu_tasks;
+}
+#endif
 
 static void info_row(lv_obj_t *parent, const char *k, const char *v,
                      lv_obj_t **out_val)
@@ -2509,6 +3606,81 @@ static void info_row(lv_obj_t *parent, const char *k, const char *v,
     if (out_val) *out_val = vl;
 }
 
+static uint8_t heap_used_pct(size_t free_bytes, size_t total_bytes)
+{
+    if (!total_bytes || free_bytes >= total_bytes) return 0;
+    size_t used = total_bytes - free_bytes;
+    return (uint8_t)((used * 100u + total_bytes / 2u) / total_bytes);
+}
+
+static void format_heap_pct(char *out, size_t out_len, uint32_t caps)
+{
+    size_t total = heap_caps_get_total_size(caps);
+    size_t free_bytes = heap_caps_get_free_size(caps);
+    if (!out || out_len == 0) return;
+    if (!total) {
+        snprintf(out, out_len, "n/a");
+        return;
+    }
+    snprintf(out, out_len, "%u%% used  %u/%u KB free",
+             heap_used_pct(free_bytes, total),
+             (unsigned)(free_bytes / 1024u),
+             (unsigned)(total / 1024u));
+}
+
+static void info_cpu_refresh(const app_tuning_config_t *cfg)
+{
+    if (!s_info_cpu) return;
+    if (!cfg || !cfg->system_cpu_load_enabled) {
+        label_set_text_if_changed(s_info_cpu, "Off");
+        return;
+    }
+#if defined(CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS) && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS && \
+    defined(CONFIG_FREERTOS_USE_TRACE_FACILITY) && CONFIG_FREERTOS_USE_TRACE_FACILITY
+    TaskStatus_t *tasks = info_cpu_tasks_get();
+    if (!tasks) {
+        label_set_text_if_changed(s_info_cpu, "n/a");
+        return;
+    }
+    configRUN_TIME_COUNTER_TYPE total = 0;
+    UBaseType_t count = uxTaskGetSystemState(tasks, INFO_CPU_TASK_MAX, &total);
+    if (count == 0 || count >= INFO_CPU_TASK_MAX || total == 0) {
+        label_set_text_if_changed(s_info_cpu, "n/a");
+        return;
+    }
+
+    configRUN_TIME_COUNTER_TYPE idle_total = 0;
+    for (UBaseType_t i = 0; i < count; i++) {
+        const char *name = tasks[i].pcTaskName;
+        if (name && strncmp(name, "IDLE", 4) == 0) idle_total += tasks[i].ulRunTimeCounter;
+    }
+
+    if (!s_info_cpu_have_prev || total <= s_info_cpu_prev_total || idle_total < s_info_cpu_prev_idle) {
+        s_info_cpu_have_prev = true;
+        s_info_cpu_prev_total = total;
+        s_info_cpu_prev_idle = idle_total;
+        label_set_text_if_changed(s_info_cpu, "Sampling");
+        return;
+    }
+
+    configRUN_TIME_COUNTER_TYPE total_delta = total - s_info_cpu_prev_total;
+    configRUN_TIME_COUNTER_TYPE idle_delta = idle_total - s_info_cpu_prev_idle;
+    s_info_cpu_prev_total = total;
+    s_info_cpu_prev_idle = idle_total;
+    if (!total_delta) {
+        label_set_text_if_changed(s_info_cpu, "n/a");
+        return;
+    }
+    uint32_t idle_pct = (uint32_t)((idle_delta * 100u + total_delta / 2u) / total_delta);
+    if (idle_pct > 100u) idle_pct = 100u;
+    char b[20];
+    snprintf(b, sizeof(b), "%u%%", (unsigned)(100u - idle_pct));
+    label_set_text_if_changed(s_info_cpu, b);
+#else
+    label_set_text_if_changed(s_info_cpu, "Build disabled");
+#endif
+}
+
 static void info_refresh(lv_timer_t *t)
 {
     if (timer_page_hidden(t, s_info_panel_root)) return;
@@ -2532,6 +3704,19 @@ static void info_refresh(lv_timer_t *t)
                  (unsigned)(free_psram / 1024));
         label_set_text_if_changed(s_info_heap, b);
     }
+    if (s_info_internal_ram) {
+        char b[48];
+        format_heap_pct(b, sizeof(b), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        label_set_text_if_changed(s_info_internal_ram, b);
+    }
+    if (s_info_psram) {
+        char b[48];
+        format_heap_pct(b, sizeof(b), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        label_set_text_if_changed(s_info_psram, b);
+    }
+
+    app_tuning_config_t cfg = load_tuning_config();
+    info_cpu_refresh(&cfg);
 
     services_status_t st;
     services_status_get(&st);
@@ -2612,6 +3797,9 @@ static void info_panel_create(lv_obj_t *parent, lv_obj_t *visibility_root)
     info_row(card, "Weather", "Not configured", &s_info_weather);
     info_row(card, "Audio sync", "Disabled", &s_info_audio);
 
+    info_row(card, "CPU Load", "Off", &s_info_cpu);
+    info_row(card, "Internal RAM", "-", &s_info_internal_ram);
+    info_row(card, "PSRAM", "-", &s_info_psram);
     info_row(card, "Uptime",  "0d 00:00:00",  &s_info_uptime);
     info_row(card, "Free heap (int/psram)", "-",  &s_info_heap);
 
@@ -2633,7 +3821,7 @@ typedef struct {
     lv_obj_t *value_label;
 } stepper_ctx_t;
 
-#define SETTINGS_STEPPER_MAX 48
+#define SETTINGS_STEPPER_MAX 36
 
 static stepper_ctx_t s_steppers[SETTINGS_STEPPER_MAX];
 static int           s_stepper_count;
@@ -2666,6 +3854,7 @@ static void stepper_btn_cb(lv_event_t *e)
 static void settings_hide_keyboard(void);
 static void settings_status_refresh(lv_timer_t *t);
 static esp_err_t theme_save_controls(bool refresh_background);
+static void idle_bottom_panel_reset(void);
 
 /* Settings-row callbacks – tiny shims so setter signatures match */
 static int  rd_kmin(void)   { led_state_t s; led_state_get(&s); return s.kelvin_min; }
@@ -2732,6 +3921,8 @@ DEFINE_TUNING_ACCESSORS(wx_forecast_gap, weather_forecast_gap_s, tuning_weather_
 DEFINE_TUNING_ACCESSORS(wx_tab_stale, weather_tab_stale_min, tuning_weather_ui_changed())
 DEFINE_TUNING_ACCESSORS(wx_tab_wake, weather_tab_wake_s, tuning_weather_ui_changed())
 DEFINE_TUNING_ACCESSORS(wx_page_update, weather_page_update_s, tuning_weather_ui_changed())
+DEFINE_TUNING_ACCESSORS(wx_graph_cycle, weather_graph_cycle_s, weather_graph_cycle_timer_apply())
+DEFINE_TUNING_ACCESSORS(wx_bottom_cycle, weather_bottom_panel_cycle_s, idle_bottom_panel_reset())
 DEFINE_TUNING_ACCESSORS(wled_poll, wled_poll_s, (void)0)
 DEFINE_TUNING_ACCESSORS(wled_stale, wled_stale_s, (void)0)
 DEFINE_TUNING_ACCESSORS(wled_hue_update, wled_hue_update_hz, lights_tuning_refresh())
@@ -2769,6 +3960,14 @@ static void idle_swipe_wake_lights_switch_event(lv_event_t *e)
     app_tuning_config_t cfg = load_tuning_config();
     cfg.idle_swipe_wake_lights_on = lv_obj_has_state(sw, LV_STATE_CHECKED);
     if (save_tuning_config(&cfg) == ESP_OK) tuning_idle_changed();
+}
+
+static void weather_bottom_mode_changed(lv_event_t *e)
+{
+    lv_obj_t *dropdown = lv_event_get_target(e);
+    app_tuning_config_t cfg = load_tuning_config();
+    cfg.weather_bottom_panel_mode = (uint8_t)lv_dropdown_get_selected(dropdown);
+    if (save_tuning_config(&cfg) == ESP_OK) idle_bottom_panel_reset();
 }
 
 static void auto_brightness_switch_event(lv_event_t *e)
@@ -2898,6 +4097,8 @@ static lv_obj_t *s_wifi_password_ta;
 static lv_obj_t *s_wifi_password_keyboard;
 static lv_obj_t *s_weather_key_ta;
 static lv_obj_t *s_weather_location_label;
+static lv_obj_t *s_weather_bottom_mode_dropdown;
+static lv_obj_t *s_system_cpu_load_switch;
 static lv_obj_t *s_idle_dismiss_lights_switch;
 static lv_obj_t *s_idle_swipe_wake_lights_switch;
 static lv_obj_t *s_idle_wake_timer_switch;
@@ -2960,6 +4161,14 @@ static lv_obj_t *s_theme_swatches[THEME_COLOR_COUNT][THEME_COLOR_CHOICES];
 static uint8_t s_theme_selected[THEME_COLOR_COUNT];
 
 /* Preset table is now in ui_background.c; accessed via bg_preset_*() */
+
+static void system_cpu_load_switch_event(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    app_tuning_config_t cfg = load_tuning_config();
+    cfg.system_cpu_load_enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    if (save_tuning_config(&cfg) == ESP_OK) info_refresh(NULL);
+}
 
 #define SETTINGS_WIFI_SCAN_MAX 12
 static wifi_scan_result_t s_wifi_scan_results[SETTINGS_WIFI_SCAN_MAX];
@@ -3052,6 +4261,11 @@ static void settings_show_panel(lv_obj_t *panel)
 static void settings_back_clicked(lv_event_t *e)
 {
     (void)e;
+    settings_show_panel(s_settings_home);
+}
+
+void screen_settings_show_home(void)
+{
     settings_show_panel(s_settings_home);
 }
 
@@ -3276,9 +4490,17 @@ typedef struct {
     uint64_t size_bytes;
 } sd_explorer_entry_t;
 
-static sd_explorer_entry_t s_sd_entries[SD_EXPLORER_MAX_ENTRIES];
+static sd_explorer_entry_t *s_sd_entries;
 static uint8_t s_sd_entry_count;
 static char s_sd_current_path[SD_EXPLORER_PATH_MAX] = BSP_SD_MOUNT_POINT;
+
+static bool sd_explorer_entries_ensure(void)
+{
+    if (s_sd_entries) return true;
+    s_sd_entries = heap_caps_calloc(SD_EXPLORER_MAX_ENTRIES, sizeof(s_sd_entries[0]),
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return s_sd_entries != NULL;
+}
 
 static bool sd_explorer_is_root(void)
 {
@@ -3768,6 +4990,7 @@ static void sd_explorer_long_pressed(lv_event_t *e)
 {
     intptr_t index = (intptr_t)lv_event_get_user_data(e);
     if (index < 0 || index >= s_sd_entry_count) return;
+    if (!s_sd_entries) return;
 
     s_sd_long_press_fired = true;
     sd_context_close();
@@ -4013,6 +5236,7 @@ static void sd_explorer_entry_clicked(lv_event_t *e)
     }
     intptr_t index = (intptr_t)lv_event_get_user_data(e);
     if (index < 0 || index >= s_sd_entry_count) return;
+    if (!s_sd_entries) return;
     sd_explorer_entry_t *entry = &s_sd_entries[index];
     if (entry->is_dir) {
         snprintf(s_sd_current_path, sizeof(s_sd_current_path), "%s", entry->path);
@@ -4185,6 +5409,11 @@ static void sd_explorer_refresh(void)
     settings_hide_keyboard();
     lv_obj_clean(s_sd_list);
     s_sd_entry_count = 0;
+    if (!sd_explorer_entries_ensure()) {
+        sd_explorer_set_status("Out of memory");
+        sd_explorer_message("Unable to allocate folder list");
+        return;
+    }
 
     esp_err_t err = sd_storage_ensure_mounted();
     if (err != ESP_OK) {
@@ -4731,7 +5960,12 @@ static void wifi_scan_start(void)
     wifi_scan_set_status("Scanning...");
     toast_show("Scanning Wi-Fi");
 
-    if (xTaskCreate(wifi_scan_worker, "wifi_scan", 6144, NULL, 5, &s_wifi_scan_task) != pdPASS) {
+    BaseType_t ok = xTaskCreateWithCaps(wifi_scan_worker, "wifi_scan", 6144,
+                                        NULL, 5, &s_wifi_scan_task,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ok != pdPASS) ok = xTaskCreate(wifi_scan_worker, "wifi_scan", 6144,
+                                       NULL, 5, &s_wifi_scan_task);
+    if (ok != pdPASS) {
         s_wifi_scan_task = NULL;
         s_wifi_scan_in_progress = false;
         if (s_wifi_scan_btn) lv_obj_clear_state(s_wifi_scan_btn, LV_STATE_DISABLED);
@@ -5066,6 +6300,46 @@ static lv_obj_t *settings_switch_row(lv_obj_t *parent, const char *icon, const c
     return sw;
 }
 
+static lv_obj_t *settings_dropdown_row(lv_obj_t *parent, const char *icon, const char *label_text,
+                                       const char *options, lv_event_cb_t event_cb, void *user_data)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 12, LV_PART_MAIN);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *ic = lv_label_create(row);
+    lv_label_set_text(ic, icon);
+    lv_obj_set_style_text_color(ic, THEME_PRIMARY_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_text_font(ic, THEME_FONT_LARGE, LV_PART_MAIN);
+
+    lv_obj_t *label = lv_label_create(row);
+    lv_label_set_text(label, label_text);
+    lv_obj_set_style_text_color(label, THEME_TEXT_PRIMARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, THEME_FONT_BODY, LV_PART_MAIN);
+    lv_obj_set_flex_grow(label, 1);
+
+    lv_obj_t *dropdown = lv_dropdown_create(row);
+    lv_obj_set_size(dropdown, 180, 52);
+    lv_dropdown_set_options(dropdown, options);
+    lv_dropdown_set_symbol(dropdown, LV_SYMBOL_DOWN);
+    lv_dropdown_set_dir(dropdown, LV_DIR_BOTTOM);
+    lv_obj_set_style_bg_color(dropdown, THEME_SURFACE_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(dropdown, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(dropdown, THEME_BORDER_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_border_width(dropdown, 1, LV_PART_MAIN);
+    lv_obj_set_style_radius(dropdown, 14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(dropdown, THEME_TEXT_PRIMARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(dropdown, THEME_FONT_BODY, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(dropdown, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(dropdown, 8, LV_PART_MAIN);
+    if (event_cb) lv_obj_add_event_cb(dropdown, event_cb, LV_EVENT_VALUE_CHANGED, user_data);
+    return dropdown;
+}
+
 static lv_obj_t *theme_switch_row(lv_obj_t *parent, const char *icon, const char *label_text)
 {
     return settings_switch_row(parent, icon, label_text, theme_switch_event, NULL);
@@ -5200,15 +6474,29 @@ static void display_settings_load_fields(void)
     settings_switch_set_checked(s_auto_brightness_switch, backlight_manager_is_enabled());
 }
 
+static void weather_settings_load_fields(void)
+{
+    app_tuning_config_t cfg = load_tuning_config();
+    if (s_weather_bottom_mode_dropdown) lv_dropdown_set_selected(s_weather_bottom_mode_dropdown, cfg.weather_bottom_panel_mode);
+}
+
+static void system_settings_load_fields(void)
+{
+    app_tuning_config_t cfg = load_tuning_config();
+    settings_switch_set_checked(s_system_cpu_load_switch, cfg.system_cpu_load_enabled);
+}
+
 static void settings_load_fields(void)
 {
     app_weather_config_t weather;
     if (app_config_weather_load(&weather) == ESP_OK && weather.configured) {
         if (s_weather_key_ta) lv_textarea_set_text(s_weather_key_ta, weather.api_key);
     }
+    weather_settings_load_fields();
     theme_settings_load_fields();
     display_settings_load_fields();
     idle_settings_load_fields();
+    system_settings_load_fields();
 }
 
 static void settings_status_refresh(lv_timer_t *t)
@@ -5805,6 +7093,8 @@ lv_obj_t *screen_settings_create(lv_obj_t *parent)
                     5, 5, 120, " s", ap_wx_tab_wake, rd_wx_tab_wake);
     add_stepper_row(wx_timing, LV_SYMBOL_REFRESH, "Page Update",
                     1, 1, 10, " s", ap_wx_page_update, rd_wx_page_update);
+    add_stepper_row(wx_timing, LV_SYMBOL_REFRESH, "Graph Auto-Scroll",
+                    5, 5, 300, " s", ap_wx_graph_cycle, rd_wx_graph_cycle);
 
     lv_obj_t *idle_wx = deep_card(s_settings_weather_page);
     lv_obj_set_size(idle_wx, LV_PCT(100), LV_SIZE_CONTENT);
@@ -5819,6 +7109,11 @@ lv_obj_t *screen_settings_create(lv_obj_t *parent)
                     15, 10, 600, " s", ap_to, rd_to);
     add_stepper_row(idle_wx, LV_SYMBOL_CHARGE, "Display Brightness",
                     5, 5, 100, "%", ap_disp, rd_disp);
+    s_weather_bottom_mode_dropdown = settings_dropdown_row(idle_wx, LV_SYMBOL_LIST, "Bottom Panel",
+                                                           "Data\nGraphs\nCycle",
+                                                           weather_bottom_mode_changed, NULL);
+    add_stepper_row(idle_wx, LV_SYMBOL_REFRESH, "Panel Cycle",
+                    5, 5, 300, " s", ap_wx_bottom_cycle, rd_wx_bottom_cycle);
 
     /* ---- Display page ---- */
     settings_header(s_settings_display_page, "Display");
@@ -5896,6 +7191,18 @@ lv_obj_t *screen_settings_create(lv_obj_t *parent)
     /* ---- System page ---- */
     settings_header(s_settings_system_page, "System");
     info_panel_create(s_settings_system_page, s_settings_system_page);
+
+    lv_obj_t *diag_card = deep_card(s_settings_system_page);
+    lv_obj_set_size(diag_card, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(diag_card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(diag_card, 0, LV_PART_MAIN);
+    lv_obj_t *diag_title = lv_label_create(diag_card);
+    lv_label_set_text(diag_title, "Diagnostics");
+    lv_obj_set_style_text_color(diag_title, THEME_TEXT_SECONDARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(diag_title, THEME_FONT_LABEL, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(diag_title, 8, LV_PART_MAIN);
+    s_system_cpu_load_switch = settings_switch_row(diag_card, LV_SYMBOL_EYE_OPEN, "CPU Load Meter",
+                                                   system_cpu_load_switch_event, NULL);
 
     lv_obj_t *ui_timing = deep_card(s_settings_system_page);
     lv_obj_set_size(ui_timing, LV_PCT(100), LV_SIZE_CONTENT);
@@ -5980,12 +7287,13 @@ static lv_obj_t *s_idle_feels;      /* "Feels Like 98°" */
 static lv_obj_t *s_idle_hilo;       /* "Hi 83°  Lo 64°" line under temp */
 static lv_obj_t *s_idle_moon_icon;
 static lv_obj_t *s_idle_moon_label;
-static lv_obj_t *s_idle_screen;
-
 /* Forecast strip handles (5 slots: day name, icon, hi/lo). */
 #define IDLE_FORECAST_SLOTS 5
 #define IDLE_TOP_PAD_X 12
 #define IDLE_WEATHER_W 272
+#define IDLE_TEMP_LABEL_W 244
+#define IDLE_MOON_LEFT_PAD (IDLE_WEATHER_W - IDLE_TEMP_LABEL_W)
+#define IDLE_MOON_LABEL_W 200
 #define IDLE_CLOCK_W 404
 static lv_obj_t *s_idle_fc_day[IDLE_FORECAST_SLOTS];
 static lv_obj_t *s_idle_fc_icon[IDLE_FORECAST_SLOTS];
@@ -6002,6 +7310,9 @@ static lv_obj_t *s_idle_m_clouds;
 static lv_obj_t *s_idle_m_visibility;
 static lv_obj_t *s_idle_m_gust;
 static lv_obj_t *s_idle_m_precip;
+static lv_obj_t *s_idle_metrics_panel;
+static lv_obj_t *s_idle_graph_panel;
+static uint32_t s_idle_bottom_next_ms;
 
 /* The idle screen is a separate, cached lv_screen, so the theme/opacity refresh
  * that runs on lv_screen_active() (the main UI) never reaches it. Re-sync it
@@ -6071,6 +7382,67 @@ static void idle_clock_tick_cb(lv_timer_t *t)
             idle_set_clock_time(&lt);
         }
     }
+}
+
+static void idle_bottom_show_graph(bool show_graph)
+{
+    if (s_idle_metrics_panel) {
+        if (show_graph) lv_obj_add_flag(s_idle_metrics_panel, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_clear_flag(s_idle_metrics_panel, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_idle_graph_panel) {
+        if (show_graph) lv_obj_clear_flag(s_idle_graph_panel, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(s_idle_graph_panel, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void idle_bottom_graph_refresh(void)
+{
+    weather_state_t w;
+    if (weather_state_get(&w) == ESP_OK && w.valid) wx_forecast_graphs_refresh(&w);
+    else wx_forecast_graphs_clear("Hourly forecast unavailable");
+}
+
+static void idle_bottom_panel_update(bool force)
+{
+    app_tuning_config_t cfg = load_tuning_config();
+    uint32_t now = ui_now_ms();
+    uint32_t interval_ms = (uint32_t)cfg.weather_bottom_panel_cycle_s * 1000u;
+    bool elapsed = force || !s_idle_bottom_next_ms || (int32_t)(now - s_idle_bottom_next_ms) >= 0;
+    bool was_graph_visible = s_idle_graph_visible;
+
+    if (cfg.weather_bottom_panel_mode == APP_WEATHER_BOTTOM_PANEL_DATA) {
+        s_idle_graph_visible = false;
+        s_idle_bottom_next_ms = now + interval_ms;
+    } else if (cfg.weather_bottom_panel_mode == APP_WEATHER_BOTTOM_PANEL_GRAPHS) {
+        s_idle_graph_visible = true;
+        if (elapsed) s_idle_bottom_next_ms = now + interval_ms;
+    } else {
+        if (force) {
+            s_idle_graph_visible = false;
+            s_idle_bottom_next_ms = now + interval_ms;
+        } else if (elapsed) {
+            if (s_idle_graph_visible) {
+                s_idle_graph_visible = false;
+            } else {
+                s_idle_graph_visible = true;
+            }
+            s_idle_bottom_next_ms = now + interval_ms;
+        }
+    }
+
+    idle_bottom_show_graph(s_idle_graph_visible);
+    if (s_idle_graph_visible) {
+        if (!was_graph_visible) weather_graph_cycle_timer_reset();
+        idle_bottom_graph_refresh();
+    }
+}
+
+static void idle_bottom_panel_reset(void)
+{
+    s_idle_bottom_next_ms = 0;
+    s_idle_graph_visible = false;
+    idle_bottom_panel_update(true);
 }
 
 static void idle_weather_tick_cb(lv_timer_t *t)
@@ -6163,6 +7535,7 @@ static void idle_weather_tick_cb(lv_timer_t *t)
                      w.snow_1h_mm_x10 / 10, w.snow_1h_mm_x10 % 10);
         } else snprintf(b, sizeof(b), "0.0 mm/h");
         label_set_text_if_changed(s_idle_m_precip, b);
+        idle_bottom_panel_update(false);
     } else {
         label_set_text_if_changed(s_idle_temp, "--°");
         label_set_text_if_changed(s_idle_feels, "Feels like —°");
@@ -6186,6 +7559,7 @@ static void idle_weather_tick_cb(lv_timer_t *t)
         label_set_text_if_changed(s_idle_m_visibility, "—");
         label_set_text_if_changed(s_idle_m_gust, "—");
         label_set_text_if_changed(s_idle_m_precip, "—");
+        idle_bottom_panel_update(false);
     }
 }
 
@@ -6430,18 +7804,24 @@ lv_obj_t *screen_idle_create(void)
     /* Icon + temp side by side */
     lv_obj_t *wx_row = idle_clean_obj(wx_col);
     lv_obj_set_size(wx_row, IDLE_WEATHER_W, 142);
-    lv_obj_set_flex_flow(wx_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(wx_row, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(wx_row, 4, LV_PART_MAIN);
+    lv_obj_add_flag(wx_row, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
 
     s_idle_icon = lv_label_create(wx_row);
     lv_label_set_text(s_idle_icon, WI_NA);
     lv_obj_set_style_text_font(s_idle_icon, THEME_FONT_WX_MEDIUM, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_idle_icon, THEME_PRIMARY_COLOR, LV_PART_MAIN);
+    lv_obj_align(s_idle_icon, LV_ALIGN_LEFT_MID, 0, -2);
 
-    s_idle_temp = lv_label_create(wx_row);
+    lv_obj_t *temp_cluster = idle_clean_obj(wx_row);
+    lv_obj_set_size(temp_cluster, IDLE_TEMP_LABEL_W, 142);
+    lv_obj_add_flag(temp_cluster, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    lv_obj_align(temp_cluster, LV_ALIGN_RIGHT_MID, 0, 0);
+
+    s_idle_temp = lv_label_create(temp_cluster);
     lv_label_set_text(s_idle_temp, "--°");
+    lv_obj_set_width(s_idle_temp, IDLE_TEMP_LABEL_W);
+    lv_label_set_long_mode(s_idle_temp, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(s_idle_temp, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_idle_temp, THEME_FONT_WX_HERO_NUM, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_idle_temp, THEME_TEXT_PRIMARY, LV_PART_MAIN);
 
@@ -6472,7 +7852,8 @@ lv_obj_t *screen_idle_create(void)
     lv_obj_t *moon_row = idle_clean_obj(wx_col);
     lv_obj_set_size(moon_row, IDLE_WEATHER_W, 30);
     lv_obj_set_flex_flow(moon_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(moon_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(moon_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_left(moon_row, IDLE_MOON_LEFT_PAD, LV_PART_MAIN);
     lv_obj_set_style_pad_column(moon_row, 8, LV_PART_MAIN);
 
     s_idle_moon_icon = lv_label_create(moon_row);
@@ -6482,7 +7863,7 @@ lv_obj_t *screen_idle_create(void)
 
     s_idle_moon_label = lv_label_create(moon_row);
     lv_label_set_text(s_idle_moon_label, "Moon —");
-    lv_obj_set_width(s_idle_moon_label, 220);
+    lv_obj_set_width(s_idle_moon_label, IDLE_MOON_LABEL_W);
     lv_label_set_long_mode(s_idle_moon_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(s_idle_moon_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_idle_moon_label, THEME_FONT_LABEL, LV_PART_MAIN);
@@ -6507,6 +7888,7 @@ lv_obj_t *screen_idle_create(void)
 
     /* ===== Bottom metrics: 5x2 tile grid ===== */
     lv_obj_t *metrics = lv_obj_create(scr);
+    s_idle_metrics_panel = metrics;
     theme_style_glass_panel(metrics, 14);
     lv_obj_set_size(metrics, LV_PCT(100), 230);
     lv_obj_set_flex_grow(metrics, 1);
@@ -6530,6 +7912,21 @@ lv_obj_t *screen_idle_create(void)
     idle_metric_cell(metrics, WI_CLOUD_UP,       "Gust",       "—",   lv_color_hex(0x4FA8FF), &s_idle_m_gust);
     idle_metric_cell(metrics, WI_RAINDROPS,      "Precip 1h",  "—",   lv_color_hex(0x4FA8FF), &s_idle_m_precip);
 
+    s_idle_graph_panel = lv_obj_create(scr);
+    theme_style_glass_panel(s_idle_graph_panel, 14);
+    lv_obj_set_size(s_idle_graph_panel, LV_PCT(100), 230);
+    lv_obj_set_flex_grow(s_idle_graph_panel, 1);
+    lv_obj_set_style_pad_hor(s_idle_graph_panel, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(s_idle_graph_panel, 10, LV_PART_MAIN);
+    lv_obj_set_flex_flow(s_idle_graph_panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_idle_graph_panel, 6, LV_PART_MAIN);
+    lv_obj_clear_flag(s_idle_graph_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_idle_graph_panel, LV_OBJ_FLAG_HIDDEN);
+    wx_card_header(s_idle_graph_panel, LV_SYMBOL_LIST, "24-HOUR FORECAST GRAPHS", THEME_PRIMARY_COLOR);
+    wx_forecast_graphs_carousel_create(s_idle_graph_panel, &s_idle_fc_view, 168, 108);
+    wx_forecast_graphs_status_create(s_idle_graph_panel, &s_idle_fc_view);
+
+    idle_bottom_panel_reset();
     lv_timer_create(idle_clock_tick_cb, 250, NULL);
     lv_timer_create(idle_weather_tick_cb, 30000, NULL);
     idle_clock_tick_cb(NULL);
