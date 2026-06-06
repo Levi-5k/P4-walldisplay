@@ -15,10 +15,10 @@ esp_err_t jpeg_hw_init(void);
  *
  * The output file has an 8-byte header:
  *   uint16 LE width, height, padded_width, padded_height
- * followed by padded_width*padded_height*2 bytes of RGB565 pixel data.
+ * followed by padded_width*padded_height*2 bytes of dithered RGB565 pixel data.
  *
- * The hardware JPEG decoder handles the IDCT, color conversion, and
- * subsampling expansion — no quality loss from software approximations.
+ * The hardware JPEG decoder handles IDCT, color conversion, and subsampling
+ * expansion to RGB888; software dithers to RGB565 to avoid gradient banding.
  */
 esp_err_t jpeg_hw_decode_to_file(const uint8_t *jpeg_data, size_t jpeg_len,
                                   const char *out_path);

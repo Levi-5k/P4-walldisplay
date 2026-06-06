@@ -33,6 +33,7 @@ void ui_background_pre_init(void);
 void ui_background_attach(lv_obj_t *screen);
 void ui_background_attach_idle_weather(lv_obj_t *screen);
 void ui_background_refresh(void);
+esp_err_t ui_background_step(int8_t direction);
 
 /* ---- download API ---- */
 typedef struct {

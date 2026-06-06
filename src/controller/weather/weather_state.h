@@ -27,9 +27,9 @@ typedef struct {
     uint8_t  humidity_pct;
     uint16_t pressure_hpa;
     uint8_t  pop_pct;
-    uint16_t precip_mm_x10;
-    uint16_t rain_mm_x10;
-    uint16_t snow_mm_x10;
+    uint16_t precip_in_x100;
+    uint16_t rain_in_x100;
+    uint16_t snow_in_x100;
 } weather_hour_t;
 
 typedef struct {

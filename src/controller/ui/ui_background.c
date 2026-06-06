@@ -49,10 +49,10 @@
 #define BG_BOOT_REFRESH_MIN_ATTEMPTS 8
 #define BG_BOOT_REFRESH_MAX_ATTEMPTS 24
 /* Bump this when the JPEG converter changes in a way that invalidates
- * previously-converted files (e.g. the v1 pixel-domain converter produced
- * corrupted output; v2 is the lossless transcoder).  On mismatch the
+ * previously-converted files (e.g. decoder/transcoder quality, dithering, or
+ * raw layout fixes).  On mismatch the
  * auto-download task deletes all images and re-downloads them.              */
-#define BG_CONV_VERSION    19
+#define BG_CONV_VERSION    21
 #define BG_NVS_NS          "ui_bg"
 #define BG_NVS_KEY_CONV    "conv_ver"
 #define BG_NVS_KEY_CONV_PRESET_FMT "conv_p%u"
@@ -61,6 +61,10 @@
 #define BG_NVS_KEY_DL_PSET "dl_pset"   /* preset index being downloaded */
 #define BG_MAX_DL_FAILURES 3           /* crash-recovery retries before giving up */
 #define BG_DL_MAX_RETRIES  2           /* per-image HTTP retries within one run */
+
+#if APP_THEME_MAX_IMAGES > 16
+#error "ui_background dl_done resume mask must be widened before adding more images"
+#endif
 
 static const char *TAG = "ui_bg";
 
@@ -77,6 +81,10 @@ static const bg_preset_t s_presets[] = {
         "https://images.unsplash.com/photo-1501785888041-af3ef285b470?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
         "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
         "https://images.unsplash.com/photo-1511884642898-4c92249e20b6?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1472214103451-9374bd1c798e?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1447752875215-b2761acb3c5d?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1502082553048-f009c37129b9?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1518173946687-a4c8892bbd9f?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
     }},
     {"City", {
         "https://images.unsplash.com/photo-1449824913935-59a10b8d2000?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
@@ -87,6 +95,10 @@ static const bg_preset_t s_presets[] = {
         "https://images.unsplash.com/photo-1496568816309-51d7c20e3b21?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
         "https://images.unsplash.com/photo-1514565131-fce0801e5785?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
         "https://images.unsplash.com/photo-1514924013411-cbf25faa35bb?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1485871981521-5b1fd3805eee?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1528909514045-2fa4ac7a08ba?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1534430480872-3498386e7856?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
     }},
     {"Space", {
         "https://images.unsplash.com/photo-1462331940025-496dfbfc7564?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
@@ -97,6 +109,10 @@ static const bg_preset_t s_presets[] = {
         "https://images.unsplash.com/photo-1506318137071-a8e063b4bec0?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
         "https://images.unsplash.com/photo-1516339901601-2e1b62dc0c45?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
         "https://images.unsplash.com/photo-1534796636912-3b95b3ab5986?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1465101162946-4377e57745c3?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1505506874110-6a7a69069a08?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1502134249126-9f3755a50d78?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1543722530-d2c3201371e7?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
     }},
     {"Abstract", {
         "https://images.unsplash.com/photo-1557683316-973673baf926?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
@@ -107,6 +123,10 @@ static const bg_preset_t s_presets[] = {
         "https://images.unsplash.com/photo-1558470598-a5dda9640f68?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
         "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
         "https://images.unsplash.com/photo-1614850715649-1d0106293bd1?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1579546929518-9e396f3cc809?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1579547621113-e4bb2a19bdd6?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1614851099362-9adf73ccebe9?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1635070041078-e363dbe005cb?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
     }},
     {"Ocean", {
         "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
@@ -117,6 +137,10 @@ static const bg_preset_t s_presets[] = {
         "https://images.unsplash.com/photo-1518837695005-2083093ee35b?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
         "https://images.unsplash.com/photo-1500534623283-312aade485b7?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
         "https://images.unsplash.com/photo-1519046904884-53103b34b206?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1493558103817-58b2924bce98?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1515238152791-8216bfdf89a7?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1473116763249-2faaef81ccda?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1509233725247-49e657c54213?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
     }},
     {"Weather", {
         "https://images.unsplash.com/photo-1504608524841-42fe6f032b4b?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
@@ -127,6 +151,10 @@ static const bg_preset_t s_presets[] = {
         "https://images.unsplash.com/photo-1504384308090-c894fdcc538d?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
         "https://images.unsplash.com/photo-1515694346937-94d85e41e6f0?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
         "https://images.unsplash.com/photo-1519681393784-d120267933ba?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1514632595-4944383f2737?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1500740516770-92bd004b996e?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1527766833261-b09c3163a791?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
+        "https://images.unsplash.com/photo-1516490981167-dc990a242afe?auto=format&fit=crop&w=720&h=720&q=100&fm=jpg",
     }},
 };
 
@@ -248,6 +276,21 @@ static void mark_background_cache_current(uint8_t preset_index)
     }
 }
 
+static uint16_t bg_dl_done_read(nvs_handle_t h)
+{
+    uint16_t done16 = 0;
+    if (nvs_get_u16(h, BG_NVS_KEY_DL_DONE, &done16) == ESP_OK) return done16;
+    uint8_t done8 = 0;
+    if (nvs_get_u8(h, BG_NVS_KEY_DL_DONE, &done8) == ESP_OK) return done8;
+    return 0;
+}
+
+static void bg_dl_done_write(nvs_handle_t h, uint16_t done)
+{
+    nvs_erase_key(h, BG_NVS_KEY_DL_DONE);
+    nvs_set_u16(h, BG_NVS_KEY_DL_DONE, done);
+}
+
 static void clear_download_state_nvs(void)
 {
     nvs_handle_t h;
@@ -319,6 +362,30 @@ static bool find_existing_slot(const app_theme_config_t *cfg, uint8_t start, uin
     if (count > APP_THEME_MAX_IMAGES) count = APP_THEME_MAX_IMAGES;
     for (uint8_t offset = 0; offset < count; offset++) {
         uint8_t candidate = (uint8_t)((start + offset) % count);
+        char path[80];
+        snprintf(path, sizeof(path), BG_FILE_FMT, (unsigned)preset, (unsigned)candidate);
+        if (file_exists(path)) {
+            if (slot) *slot = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool find_existing_slot_dir(const app_theme_config_t *cfg, uint8_t start,
+                                   int8_t direction, uint8_t *slot)
+{
+    if (!cfg || cfg->image_count == 0) return false;
+    uint8_t preset = cfg->background_preset;
+    if (preset >= bg_preset_count()) preset = 0;
+    uint8_t count = cfg->image_count;
+    if (count > APP_THEME_MAX_IMAGES) count = APP_THEME_MAX_IMAGES;
+    if (count == 0) return false;
+    uint8_t current = (uint8_t)(start % count);
+    for (uint8_t offset = 0; offset < count; offset++) {
+        uint8_t candidate = direction < 0 ?
+                            (uint8_t)((current + count - offset) % count) :
+                            (uint8_t)((current + offset) % count);
         char path[80];
         snprintf(path, sizeof(path), BG_FILE_FMT, (unsigned)preset, (unsigned)candidate);
         if (file_exists(path)) {
@@ -432,8 +499,8 @@ static void slide_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
     app_theme_config_t cfg;
-    app_config_theme_load(&cfg);
-    if (cfg.image_count == 0) return;
+    if (app_config_theme_load(&cfg) != ESP_OK) app_config_theme_defaults(&cfg);
+    if (!cfg.slideshow_enabled || cfg.image_count == 0) return;
     uint8_t count = cfg.image_count > APP_THEME_MAX_IMAGES ? APP_THEME_MAX_IMAGES : cfg.image_count;
     s_active_slot = (uint8_t)((s_active_slot + 1) % count);
     apply_background();
@@ -442,7 +509,7 @@ static void slide_timer_cb(lv_timer_t *timer)
 static void apply_background(void)
 {
     app_theme_config_t cfg;
-    app_config_theme_load(&cfg);
+    if (app_config_theme_load(&cfg) != ESP_OK) app_config_theme_defaults(&cfg);
     theme_apply_config(&cfg);
 
     if (s_screen_count == 0) {
@@ -507,7 +574,14 @@ static void apply_background(void)
     }
     uint16_t img_w = hdr[0], img_h = hdr[1];
     uint16_t pad_w = hdr[2], pad_h = hdr[3];
+    if (img_w == 0 || img_h == 0 || pad_w < img_w || pad_h < img_h) {
+        fclose(rf);
+        ESP_LOGE(TAG, "apply_background: invalid raw header %ux%u padded %ux%u",
+                 img_w, img_h, pad_w, pad_h);
+        return;
+    }
     size_t pixel_bytes = (size_t)pad_w * pad_h * 2;
+    size_t visible_bytes = (size_t)pad_w * img_h * 2;
     uint8_t *new_pixels = heap_caps_malloc(pixel_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!new_pixels) {
         fclose(rf);
@@ -538,11 +612,11 @@ static void apply_background(void)
     s_raw_pixels = new_pixels;
     memset(&s_raw_dsc, 0, sizeof(s_raw_dsc));
     s_raw_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-    s_raw_dsc.header.w = pad_w;
-    s_raw_dsc.header.h = pad_h;
+    s_raw_dsc.header.w = img_w;
+    s_raw_dsc.header.h = img_h;
     s_raw_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
     s_raw_dsc.header.stride = pad_w * 2;
-    s_raw_dsc.data_size = (uint32_t)pixel_bytes;
+    s_raw_dsc.data_size = (uint32_t)visible_bytes;
     s_raw_dsc.data = s_raw_pixels;
 
     bool applied_to_any_screen = false;
@@ -558,7 +632,7 @@ static void apply_background(void)
         applied_to_any_screen = true;
     }
 
-    if (applied_to_any_screen && cfg.image_count > 1) {
+    if (applied_to_any_screen && cfg.slideshow_enabled && cfg.image_count > 1) {
         uint32_t period = cfg.slideshow_seconds;
         if (period < 5) period = 5;
         s_timer = lv_timer_create(slide_timer_cb, period * 1000u, NULL);
@@ -639,6 +713,30 @@ void ui_background_refresh(void)
     s_sd_background_allowed = true;
     s_deferred_logged = false;
     apply_background();
+}
+
+esp_err_t ui_background_step(int8_t direction)
+{
+    if (direction == 0) return ESP_ERR_INVALID_ARG;
+    if (services_network_bulk_active() || sd_storage_is_network_busy()) return ESP_ERR_INVALID_STATE;
+
+    app_theme_config_t cfg;
+    if (app_config_theme_load(&cfg) != ESP_OK) app_config_theme_defaults(&cfg);
+    if (!cfg.background_enabled || cfg.image_count == 0) return ESP_ERR_INVALID_STATE;
+
+    uint8_t count = cfg.image_count > APP_THEME_MAX_IMAGES ? APP_THEME_MAX_IMAGES : cfg.image_count;
+    if (count == 0) return ESP_ERR_INVALID_STATE;
+    uint8_t start = direction < 0 ?
+                    (uint8_t)((s_active_slot + count - 1u) % count) :
+                    (uint8_t)((s_active_slot + 1u) % count);
+    uint8_t slot = start;
+    if (!find_existing_slot_dir(&cfg, start, direction, &slot)) return ESP_ERR_NOT_FOUND;
+
+    s_active_slot = slot;
+    s_sd_background_allowed = true;
+    s_deferred_logged = false;
+    apply_background();
+    return ESP_OK;
 }
 
 bool ui_background_is_busy(void)
@@ -1887,13 +1985,12 @@ static void auto_dl_on_saved(uint8_t index, uint8_t tag, const char *path,
     nvs_handle_t fh;
     if (nvs_open(BG_NVS_NS, NVS_READWRITE, &fh) == ESP_OK) {
         nvs_set_u8(fh, BG_NVS_KEY_DL_FAIL, 0);
-        uint8_t done = 0;
-        nvs_get_u8(fh, BG_NVS_KEY_DL_DONE, &done);
-        done |= (1u << tag);   /* tag = image index */
-        nvs_set_u8(fh, BG_NVS_KEY_DL_DONE, done);
+        uint16_t done = bg_dl_done_read(fh);
+        done |= (uint16_t)(1u << tag);   /* tag = image index */
+        bg_dl_done_write(fh, done);
         nvs_commit(fh);
         nvs_close(fh);
-        ESP_LOGI(TAG, "  NVS dl_done=0x%02x (image %u saved)", done, tag);
+        ESP_LOGI(TAG, "  NVS dl_done=0x%04x (image %u saved)", done, tag);
     }
 }
 
@@ -1940,7 +2037,9 @@ static void auto_download_task(void *arg)
         ESP_LOGI(TAG, "auto-download: no migration needed, images present");
         goto refresh;
     }
-    if (!need_migration) {
+    if (need_migration) {
+        ESP_LOGW(TAG, "auto-download: rebuilding cached backgrounds for converter update");
+    } else {
         ESP_LOGW(TAG, "auto-download: version OK but images missing — re-downloading");
     }
 
@@ -1948,7 +2047,7 @@ static void auto_download_task(void *arg)
      * dl_fail counts consecutive crash-recovery attempts.
      * dl_pset / dl_done track which preset + images are done so
      * after a crash we can resume where we left off.              */
-    uint8_t nvs_done = 0;       /* bitmask of images saved in prior runs */
+    uint16_t nvs_done = 0;      /* bitmask of images saved in prior runs */
     {
         nvs_handle_t h;
         uint8_t fail_count = 0;
@@ -1965,11 +2064,11 @@ static void auto_download_task(void *arg)
             uint8_t saved_pset = 0xFF;
             nvs_get_u8(h, BG_NVS_KEY_DL_PSET, &saved_pset);
             if (saved_pset != active_preset) {
-                nvs_set_u8(h, BG_NVS_KEY_DL_DONE, 0);
+                bg_dl_done_write(h, 0);
                 ESP_LOGI(TAG, "auto-download: preset changed %u->%u, reset dl_done",
                          saved_pset, active_preset);
             } else {
-                nvs_get_u8(h, BG_NVS_KEY_DL_DONE, &nvs_done);
+                nvs_done = bg_dl_done_read(h);
             }
 
             nvs_set_u8(h, BG_NVS_KEY_DL_PSET, active_preset);
@@ -1977,7 +2076,7 @@ static void auto_download_task(void *arg)
             nvs_commit(h);
             nvs_close(h);
 
-            ESP_LOGI(TAG, "auto-download: fail_count=%u, nvs_done=0x%02x",
+            ESP_LOGI(TAG, "auto-download: fail_count=%u, nvs_done=0x%04x",
                      fail_count, nvs_done);
         }
     }
@@ -1992,20 +2091,24 @@ static void auto_download_task(void *arg)
         ESP_LOGW(TAG, "auto-download: could not acquire display lock to clear backgrounds");
     }
 
-    /* Build download queue — all items initially unskipped.
-     * bg_dl_queue_skip_existing() checks SD for files already on disk.
-     * We also skip any images that NVS says were saved in a prior run
-     * (covers the case where SD mount fails but NVS remembers state). */
+    /* Build download queue — SD is authoritative. NVS tracks crash recovery,
+     * but manually-deleted files must never be skipped just because dl_done
+     * still has their old bits set. */
     {
         bg_dl_queue_t q;
         bg_dl_queue_init(&q);
         for (uint8_t i = 0; i < total_images; i++) {
             bool nvs_has_it = (nvs_done >> i) & 1u;
+            if (nvs_has_it) ESP_LOGI(TAG, "  [%u] NVS previously marked done", (unsigned)(i + 1));
             bg_dl_queue_add(&q, preset->urls[i],
                             (unsigned)active_preset, (unsigned)i,
-                            nvs_has_it, i);
+                            false, i);
         }
-        bg_dl_queue_skip_existing(&q);
+        if (!need_migration) {
+            bg_dl_queue_skip_existing(&q);
+        } else {
+            ESP_LOGI(TAG, "auto-download: converter migration, not skipping existing files");
+        }
 
         uint8_t to_download = q.count - q.skipped;
 

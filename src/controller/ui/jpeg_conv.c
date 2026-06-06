@@ -162,6 +162,15 @@ static int extend(int v, int nbits)
     return v;
 }
 
+static void refine_nonzero_coeff(bits_t *bs, int16_t *coef, uint8_t Al)
+{
+    int p1 = 1 << Al;
+    bool correction = bits_getbool(bs);
+    if (correction && (*coef & p1) == 0) {
+        *coef = (int16_t)(*coef + (*coef >= 0 ? p1 : -p1));
+    }
+}
+
 /* ----- progressive JPEG context ---------------------------------------- */
 
 typedef struct {
@@ -325,6 +334,7 @@ static void decode_block(jpeg_ctx_t *ctx, bits_t *bs, int16_t *blk,
             }
         } else {
             /* refining AC scan */
+            int p1 = 1 << Al;
             int k = Ss;
             if (*eob_run == 0) {
                 for (; k <= Se; k++) {
@@ -336,34 +346,40 @@ static void decode_block(jpeg_ctx_t *ctx, bits_t *bs, int16_t *blk,
                             if (r > 0) *eob_run += bits_get(bs, r);
                             break;
                         }
-                        int zeros = 0;
-                        while (zeros < 16 && k <= Se) {
-                            if (blk[natural[k]] != 0) {
-                                if (bits_getbool(bs))
-                                    blk[natural[k]] += (blk[natural[k]] > 0 ? 1 : -1) << Al;
-                            } else { zeros++; }
-                            if (zeros < 16) k++;
-                        }
-                    } else {
-                        int val = bits_getbool(bs) ? 1 : -1;
-                        int zeros = r;
+                        int zeros = 16;
                         while (zeros > 0 && k <= Se) {
-                            if (blk[natural[k]] != 0) {
-                                if (bits_getbool(bs))
-                                    blk[natural[k]] += (blk[natural[k]] > 0 ? 1 : -1) << Al;
-                            } else { zeros--; }
+                            int16_t *coef = &blk[natural[k]];
+                            if (*coef != 0) {
+                                refine_nonzero_coeff(bs, coef, Al);
+                            } else {
+                                zeros--;
+                            }
                             k++;
                         }
-                        if (k <= Se)
-                            blk[natural[k]] = (int16_t)(val << Al);
+                        k--;
+                    } else {
+                        int val = bits_getbool(bs) ? p1 : -p1;
+                        int zeros = r;
+                        for (; k <= Se; k++) {
+                            int16_t *coef = &blk[natural[k]];
+                            if (*coef != 0) {
+                                refine_nonzero_coeff(bs, coef, Al);
+                                continue;
+                            }
+                            if (zeros == 0) {
+                                *coef = (int16_t)val;
+                                break;
+                            }
+                            zeros--;
+                        }
                     }
                 }
             }
             if (*eob_run > 0) {
                 for (; k <= Se; k++) {
-                    if (blk[natural[k]] != 0) {
-                        if (bits_getbool(bs))
-                            blk[natural[k]] += (blk[natural[k]] > 0 ? 1 : -1) << Al;
+                    int16_t *coef = &blk[natural[k]];
+                    if (*coef != 0) {
+                        refine_nonzero_coeff(bs, coef, Al);
                     }
                 }
                 (*eob_run)--;

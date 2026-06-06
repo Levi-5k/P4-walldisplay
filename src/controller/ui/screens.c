@@ -1588,6 +1588,7 @@ static lv_point_precise_t s_wx_wind_points[2];
 #define WX_HISTORY_SERIES_FILL_A 2
 #define WX_HISTORY_SERIES_FILL_B 3
 #define WX_HISTORY_SERIES_COUNT 4
+#define WX_GRAPH_TIME_LABELS 5
 typedef int32_t wx_history_chart_values_t[WX_HISTORY_SERIES_COUNT][WX_HISTORY_CHART_POINTS];
 
 typedef enum {
@@ -1608,9 +1609,7 @@ typedef struct {
     lv_obj_t *data_b[WX_GRAPH_COUNT];
     lv_obj_t *axis_hi[WX_GRAPH_COUNT];
     lv_obj_t *axis_lo[WX_GRAPH_COUNT];
-    lv_obj_t *time_start[WX_GRAPH_COUNT];
-    lv_obj_t *time_mid[WX_GRAPH_COUNT];
-    lv_obj_t *time_end[WX_GRAPH_COUNT];
+    lv_obj_t *time_label[WX_GRAPH_COUNT][WX_GRAPH_TIME_LABELS];
     lv_obj_t *status;
 } wx_history_graph_view_t;
 
@@ -1644,9 +1643,7 @@ typedef struct {
     lv_obj_t *data_lo[WX_FC_GRAPH_COUNT];
     lv_obj_t *axis_hi[WX_FC_GRAPH_COUNT];
     lv_obj_t *axis_lo[WX_FC_GRAPH_COUNT];
-    lv_obj_t *time_start[WX_FC_GRAPH_COUNT];
-    lv_obj_t *time_mid[WX_FC_GRAPH_COUNT];
-    lv_obj_t *time_end[WX_FC_GRAPH_COUNT];
+    lv_obj_t *time_label[WX_FC_GRAPH_COUNT][WX_GRAPH_TIME_LABELS];
     lv_obj_t *status;
 } wx_forecast_graph_view_t;
 
@@ -1959,6 +1956,53 @@ static void format_local_weekday(char *out, size_t n, uint32_t utc, int32_t tz)
     snprintf(out, n, "%s", names[tm.tm_wday % 7]);
 }
 
+static int32_t wx_hpa_to_inhg_x100(uint16_t hpa)
+{
+    return (int32_t)(((uint32_t)hpa * 2953u + 500u) / 1000u);
+}
+
+static uint16_t wx_mm_x10_to_in_x100(uint16_t mm_x10)
+{
+    uint32_t value = ((uint32_t)mm_x10 * 100u + 127u) / 254u;
+    return value > UINT16_MAX ? UINT16_MAX : (uint16_t)value;
+}
+
+static void wx_format_x100(char *out, size_t out_len, int32_t value, const char *unit)
+{
+    if (!out || out_len == 0) return;
+    int64_t mag = value;
+    bool neg = mag < 0;
+    if (neg) mag = -mag;
+    if (unit && unit[0]) {
+        snprintf(out, out_len, "%s%lld.%02lld %s", neg ? "-" : "",
+                 (long long)(mag / 100), (long long)(mag % 100), unit);
+    } else {
+        snprintf(out, out_len, "%s%lld.%02lld", neg ? "-" : "",
+                 (long long)(mag / 100), (long long)(mag % 100));
+    }
+}
+
+static void wx_format_pressure_inhg(char *out, size_t out_len, uint16_t hpa)
+{
+    wx_format_x100(out, out_len, wx_hpa_to_inhg_x100(hpa), "inHg");
+}
+
+static void wx_format_precip_1h(char *out, size_t out_len, uint16_t rain_mm_x10, uint16_t snow_mm_x10)
+{
+    if (!out || out_len == 0) return;
+    uint16_t rain_in_x100 = wx_mm_x10_to_in_x100(rain_mm_x10);
+    uint16_t snow_in_x100 = wx_mm_x10_to_in_x100(snow_mm_x10);
+    if (rain_mm_x10 || snow_mm_x10) {
+        char rain[16];
+        char snow[16];
+        wx_format_x100(rain, sizeof(rain), rain_in_x100, NULL);
+        wx_format_x100(snow, sizeof(snow), snow_in_x100, NULL);
+        snprintf(out, out_len, "R %s  S %s in", rain, snow);
+    } else {
+        snprintf(out, out_len, "0.00 in/h");
+    }
+}
+
 static void wx_wind_visual_set(const weather_state_t *w)
 {
     static const int8_t offsets[16][2] = {
@@ -2043,18 +2087,18 @@ static bool wx_graph_sample_value(const weather_history_sample_t *sample,
         case WX_GRAPH_PRESSURE:
             if (series) {
                 if (!sample->grnd_level_hpa) return false;
-                *out = sample->grnd_level_hpa;
+                *out = wx_hpa_to_inhg_x100(sample->grnd_level_hpa);
             } else {
                 uint16_t pressure = sample->sea_level_hpa ? sample->sea_level_hpa : sample->pressure_hpa;
                 if (!pressure) return false;
-                *out = pressure;
+                *out = wx_hpa_to_inhg_x100(pressure);
             }
             return true;
         case WX_GRAPH_WIND:
             *out = (int32_t)((series ? sample->wind_gust_mph_x10 : sample->wind_mph_x10) + 5u) / 10;
             return true;
         case WX_GRAPH_PRECIP:
-            *out = series ? sample->snow_1h_mm_x10 : sample->rain_1h_mm_x10;
+            *out = wx_mm_x10_to_in_x100(series ? sample->snow_1h_mm_x10 : sample->rain_1h_mm_x10);
             return true;
         default:
             return false;
@@ -2073,15 +2117,25 @@ static void wx_graph_format_range(char *out, size_t out_len, wx_graph_mode_t mod
             snprintf(out, out_len, "%ld%% to %ld%%", (long)min_value, (long)max_value);
             break;
         case WX_GRAPH_PRESSURE:
-            snprintf(out, out_len, "%ld to %ld hPa", (long)min_value, (long)max_value);
+            {
+                char min_text[16];
+                char max_text[16];
+                wx_format_x100(min_text, sizeof(min_text), min_value, NULL);
+                wx_format_x100(max_text, sizeof(max_text), max_value, NULL);
+                snprintf(out, out_len, "%s to %s inHg", min_text, max_text);
+            }
             break;
         case WX_GRAPH_WIND:
             snprintf(out, out_len, "%ld to %ld mph", (long)min_value, (long)max_value);
             break;
         case WX_GRAPH_PRECIP:
-            snprintf(out, out_len, "%ld.%ld to %ld.%ld mm",
-                     (long)(min_value / 10), labs((long)(min_value % 10)),
-                     (long)(max_value / 10), labs((long)(max_value % 10)));
+            {
+                char min_text[16];
+                char max_text[16];
+                wx_format_x100(min_text, sizeof(min_text), min_value, NULL);
+                wx_format_x100(max_text, sizeof(max_text), max_value, NULL);
+                snprintf(out, out_len, "%s to %s in", min_text, max_text);
+            }
             break;
         default:
             snprintf(out, out_len, "%ld to %ld", (long)min_value, (long)max_value);
@@ -2100,14 +2154,13 @@ static void wx_history_axis_format(char *out, size_t out_len, wx_graph_mode_t mo
             snprintf(out, out_len, "%ld%%", (long)value);
             break;
         case WX_GRAPH_PRESSURE:
-            snprintf(out, out_len, "%ld", (long)value);
+            wx_format_x100(out, out_len, value, NULL);
             break;
         case WX_GRAPH_WIND:
             snprintf(out, out_len, "%ld", (long)value);
             break;
         case WX_GRAPH_PRECIP:
-            snprintf(out, out_len, "%ld.%ld",
-                     (long)(value / 10), labs((long)(value % 10)));
+            wx_format_x100(out, out_len, value, NULL);
             break;
         default:
             snprintf(out, out_len, "%ld", (long)value);
@@ -2166,7 +2219,6 @@ static void wx_history_fill_missing_line(wx_history_chart_values_t *values,
 static void wx_history_graph_view_update_labels(wx_history_graph_view_t *view,
                                                 wx_graph_mode_t mode,
                                                 uint32_t window_start_utc,
-                                                uint32_t window_mid_utc,
                                                 uint32_t window_end_utc,
                                                 int32_t tz_offset_s,
                                                 bool have_values,
@@ -2209,18 +2261,18 @@ static void wx_history_graph_view_update_labels(wx_history_graph_view_t *view,
         label_set_text_if_changed(view->axis_lo[mode], "—");
     }
 
-    if (window_start_utc && window_mid_utc && window_end_utc) {
+    if (window_start_utc && window_end_utc && window_end_utc >= window_start_utc) {
         char hm[16];
-        format_local_hm(hm, sizeof(hm), window_start_utc, tz_offset_s);
-        label_set_text_if_changed(view->time_start[mode], hm);
-        format_local_hm(hm, sizeof(hm), window_mid_utc, tz_offset_s);
-        label_set_text_if_changed(view->time_mid[mode], hm);
-        format_local_hm(hm, sizeof(hm), window_end_utc, tz_offset_s);
-        label_set_text_if_changed(view->time_end[mode], hm);
+        uint32_t span_s = window_end_utc - window_start_utc;
+        for (uint8_t i = 0; i < WX_GRAPH_TIME_LABELS; i++) {
+            uint32_t label_utc = window_start_utc + (uint32_t)(((uint64_t)span_s * i) / (WX_GRAPH_TIME_LABELS - 1u));
+            format_local_hm(hm, sizeof(hm), label_utc, tz_offset_s);
+            label_set_text_if_changed(view->time_label[mode][i], hm);
+        }
     } else {
-        label_set_text_if_changed(view->time_start[mode], "--:--");
-        label_set_text_if_changed(view->time_mid[mode], "--:--");
-        label_set_text_if_changed(view->time_end[mode], "--:--");
+        for (uint8_t i = 0; i < WX_GRAPH_TIME_LABELS; i++) {
+            label_set_text_if_changed(view->time_label[mode][i], "--:--");
+        }
     }
 }
 
@@ -2236,7 +2288,7 @@ static void wx_history_graph_view_clear(wx_history_graph_view_t *view, const cha
             }
         }
         wx_history_graph_view_set_chart(view, (wx_graph_mode_t)mode, 0, 100);
-        wx_history_graph_view_update_labels(view, (wx_graph_mode_t)mode, 0, 0, 0, 0,
+        wx_history_graph_view_update_labels(view, (wx_graph_mode_t)mode, 0, 0, 0,
                                             false, 0, 100,
                                             false, 0, 0,
                                             false, 0, 0);
@@ -2275,8 +2327,6 @@ static void wx_history_refresh(void)
     }
     uint32_t window_start_utc = window_end_utc > WX_HISTORY_WINDOW_SECONDS ?
                                 window_end_utc - WX_HISTORY_WINDOW_SECONDS : 0;
-    uint32_t window_mid_utc = window_start_utc ?
-                              window_start_utc + WX_HISTORY_WINDOW_SECONDS / 2u : 0;
     uint8_t window_sample_count = 0;
 
     for (uint8_t i = 0; i < history->count; i++) {
@@ -2343,19 +2393,18 @@ static void wx_history_refresh(void)
             axis_max = 100;
         } else if (have_values) {
             int32_t pad = 4;
-            if (mode == WX_GRAPH_PRESSURE) pad = 2;
+            if (mode == WX_GRAPH_PRESSURE) pad = 6;
             else if (mode == WX_GRAPH_WIND) pad = 3;
             else if (mode == WX_GRAPH_PRECIP) pad = 5;
             axis_min = min_value - pad;
             axis_max = max_value + pad;
             if (mode == WX_GRAPH_WIND || mode == WX_GRAPH_PRECIP) axis_min = 0;
-            if (axis_min == axis_max) axis_max = axis_min + (mode == WX_GRAPH_PRESSURE ? 4 : 8);
+            if (axis_min == axis_max) axis_max = axis_min + (mode == WX_GRAPH_PRESSURE ? 8 : 8);
         }
 
         wx_history_graph_view_set_chart(&s_wx_history_view, (wx_graph_mode_t)mode, axis_min, axis_max);
         wx_history_graph_view_update_labels(&s_wx_history_view, (wx_graph_mode_t)mode,
                                             window_sample_count ? window_start_utc : 0,
-                                            window_sample_count ? window_mid_utc : 0,
                                             window_sample_count ? window_end_utc : 0,
                                             tz_offset_s,
                                             have_values, axis_min, axis_max,
@@ -2407,7 +2456,7 @@ static bool wx_forecast_graph_value(const weather_hour_t *hour,
     switch (mode) {
         case WX_FC_GRAPH_PRESSURE:
             if (!hour->pressure_hpa) return false;
-            *out = hour->pressure_hpa;
+            *out = wx_hpa_to_inhg_x100(hour->pressure_hpa);
             return true;
         case WX_FC_GRAPH_TEMP:
             *out = hour->temp_f;
@@ -2416,10 +2465,10 @@ static bool wx_forecast_graph_value(const weather_hour_t *hour,
             *out = hour->humidity_pct;
             return true;
         case WX_FC_GRAPH_PRECIP: {
-            uint32_t mm_x10 = hour->precip_mm_x10;
-            if (!mm_x10) mm_x10 = (uint32_t)hour->rain_mm_x10 + hour->snow_mm_x10;
-            if (mm_x10 > INT32_MAX) mm_x10 = INT32_MAX;
-            *out = (int32_t)mm_x10;
+            uint32_t in_x100 = hour->precip_in_x100;
+            if (!in_x100) in_x100 = (uint32_t)hour->rain_in_x100 + hour->snow_in_x100;
+            if (in_x100 > INT32_MAX) in_x100 = INT32_MAX;
+            *out = (int32_t)in_x100;
             return true;
         }
         default:
@@ -2434,7 +2483,7 @@ static void wx_forecast_axis_format(char *out, size_t out_len,
     if (!out || out_len == 0) return;
     switch (mode) {
         case WX_FC_GRAPH_PRESSURE:
-            snprintf(out, out_len, "%ld", (long)value);
+            wx_format_x100(out, out_len, value, NULL);
             break;
         case WX_FC_GRAPH_TEMP:
             snprintf(out, out_len, "%ld°", (long)value);
@@ -2443,8 +2492,7 @@ static void wx_forecast_axis_format(char *out, size_t out_len,
             snprintf(out, out_len, "%ld%%", (long)value);
             break;
         case WX_FC_GRAPH_PRECIP:
-            snprintf(out, out_len, "%ld.%ld",
-                     (long)(value / 10), labs((long)(value % 10)));
+            wx_format_x100(out, out_len, value, NULL);
             break;
         default:
             snprintf(out, out_len, "%ld", (long)value);
@@ -2452,14 +2500,14 @@ static void wx_forecast_axis_format(char *out, size_t out_len,
     }
 }
 
-static void wx_forecast_metric_format(char *out, size_t out_len,
-                                      wx_forecast_graph_t mode,
-                                      int32_t value)
+static void wx_forecast_value_format(char *out, size_t out_len,
+                                     wx_forecast_graph_t mode,
+                                     int32_t value)
 {
     if (!out || out_len == 0) return;
     switch (mode) {
         case WX_FC_GRAPH_PRESSURE:
-            snprintf(out, out_len, "%ld hPa", (long)value);
+            wx_format_x100(out, out_len, value, "inHg");
             break;
         case WX_FC_GRAPH_TEMP:
             snprintf(out, out_len, "%ld°", (long)value);
@@ -2468,8 +2516,7 @@ static void wx_forecast_metric_format(char *out, size_t out_len,
             snprintf(out, out_len, "%ld%%", (long)value);
             break;
         case WX_FC_GRAPH_PRECIP:
-            snprintf(out, out_len, "%ld.%ld mm",
-                     (long)(value / 10), labs((long)(value % 10)));
+            wx_format_x100(out, out_len, value, "in");
             break;
         default:
             snprintf(out, out_len, "%ld", (long)value);
@@ -2490,11 +2537,11 @@ static void wx_forecast_graph_view_update_labels(wx_forecast_graph_view_t *view,
     if (!view) return;
     char text[32];
     if (have_values) {
-        wx_forecast_metric_format(text, sizeof(text), mode, max_value);
+        wx_forecast_value_format(text, sizeof(text), mode, max_value);
         char hi[40];
         snprintf(hi, sizeof(hi), "High %s", text);
         label_set_text_if_changed(view->data_hi[mode], hi);
-        wx_forecast_metric_format(text, sizeof(text), mode, min_value);
+        wx_forecast_value_format(text, sizeof(text), mode, min_value);
         char lo[40];
         snprintf(lo, sizeof(lo), "Low %s", text);
         label_set_text_if_changed(view->data_lo[mode], lo);
@@ -2512,16 +2559,15 @@ static void wx_forecast_graph_view_update_labels(wx_forecast_graph_view_t *view,
 
     if (w && count > 0) {
         char hm[16];
-        format_local_hm(hm, sizeof(hm), w->hours[0].dt_utc, w->tz_offset_s);
-        label_set_text_if_changed(view->time_start[mode], hm);
-        format_local_hm(hm, sizeof(hm), w->hours[count / 2].dt_utc, w->tz_offset_s);
-        label_set_text_if_changed(view->time_mid[mode], hm);
-        format_local_hm(hm, sizeof(hm), w->hours[count - 1].dt_utc, w->tz_offset_s);
-        label_set_text_if_changed(view->time_end[mode], hm);
+        for (uint8_t i = 0; i < WX_GRAPH_TIME_LABELS; i++) {
+            uint8_t idx = count > 1 ? (uint8_t)(((uint16_t)(count - 1u) * i) / (WX_GRAPH_TIME_LABELS - 1u)) : 0;
+            format_local_hm(hm, sizeof(hm), w->hours[idx].dt_utc, w->tz_offset_s);
+            label_set_text_if_changed(view->time_label[mode][i], hm);
+        }
     } else {
-        label_set_text_if_changed(view->time_start[mode], "--:--");
-        label_set_text_if_changed(view->time_mid[mode], "--:--");
-        label_set_text_if_changed(view->time_end[mode], "--:--");
+        for (uint8_t i = 0; i < WX_GRAPH_TIME_LABELS; i++) {
+            label_set_text_if_changed(view->time_label[mode][i], "--:--");
+        }
     }
 }
 
@@ -2599,12 +2645,12 @@ static void wx_forecast_graphs_refresh(const weather_state_t *w)
             axis_max = 100;
         } else if (have_values) {
             int32_t pad = 4;
-            if (mode == WX_FC_GRAPH_PRESSURE) pad = 2;
+            if (mode == WX_FC_GRAPH_PRESSURE) pad = 6;
             else if (mode == WX_FC_GRAPH_PRECIP) pad = 5;
             axis_min = min_value - pad;
             axis_max = max_value + pad;
             if (mode == WX_FC_GRAPH_PRECIP) axis_min = 0;
-            if (axis_min == axis_max) axis_max = axis_min + (mode == WX_FC_GRAPH_PRESSURE ? 4 : 8);
+            if (axis_min == axis_max) axis_max = axis_min + (mode == WX_FC_GRAPH_PRESSURE ? 8 : 8);
         }
 
         wx_forecast_graph_view_set_chart(&s_wx_fc_view, (wx_forecast_graph_t)mode, axis_min, axis_max);
@@ -2691,8 +2737,7 @@ static void weather_refresh(lv_timer_t *t)
     label_set_text_if_changed(s_wx_hilo, b);
 
     if (w.pressure_hpa) {
-        double inHg = (double)w.pressure_hpa * 0.02953;
-        snprintf(b, sizeof(b), "%.2f inHg", inHg);
+        wx_format_pressure_inhg(b, sizeof(b), w.pressure_hpa);
     } else snprintf(b, sizeof(b), "—");
     label_set_text_if_changed(s_wx_pressure, b);
 
@@ -2715,11 +2760,7 @@ static void weather_refresh(lv_timer_t *t)
     } else snprintf(b, sizeof(b), "—");
     label_set_text_if_changed(s_wx_gust, b);
 
-    if (w.rain_1h_mm_x10 || w.snow_1h_mm_x10) {
-        snprintf(b, sizeof(b), "R %u.%u  S %u.%u mm",
-                 w.rain_1h_mm_x10 / 10, w.rain_1h_mm_x10 % 10,
-                 w.snow_1h_mm_x10 / 10, w.snow_1h_mm_x10 % 10);
-    } else snprintf(b, sizeof(b), "0.0 mm/h");
+    wx_format_precip_1h(b, sizeof(b), w.rain_1h_mm_x10, w.snow_1h_mm_x10);
     label_set_text_if_changed(s_wx_precip, b);
 
     char hm[16];
@@ -3032,17 +3073,17 @@ static void wx_forecast_graph_slide_create(lv_obj_t *carousel,
     lv_obj_set_style_pad_right(time_row, 52, LV_PART_MAIN);
     lv_obj_clear_flag(time_row, LV_OBJ_FLAG_SCROLLABLE);
 
-    view->time_start[mode] = lv_label_create(time_row);
-    view->time_mid[mode] = lv_label_create(time_row);
-    view->time_end[mode] = lv_label_create(time_row);
-    lv_obj_t *time_labels[3] = {view->time_start[mode], view->time_mid[mode], view->time_end[mode]};
-    for (int i = 0; i < 3; i++) {
-        lv_label_set_text(time_labels[i], "--:--");
-        lv_obj_set_width(time_labels[i], 72);
-        lv_label_set_long_mode(time_labels[i], LV_LABEL_LONG_DOT);
-        lv_obj_set_style_text_align(time_labels[i], i == 0 ? LV_TEXT_ALIGN_LEFT : (i == 1 ? LV_TEXT_ALIGN_CENTER : LV_TEXT_ALIGN_RIGHT), LV_PART_MAIN);
-        lv_obj_set_style_text_color(time_labels[i], THEME_TEXT_MUTED, LV_PART_MAIN);
-        lv_obj_set_style_text_font(time_labels[i], THEME_FONT_SMALL, LV_PART_MAIN);
+    for (uint8_t i = 0; i < WX_GRAPH_TIME_LABELS; i++) {
+        view->time_label[mode][i] = lv_label_create(time_row);
+        lv_label_set_text(view->time_label[mode][i], "--:--");
+        lv_obj_set_width(view->time_label[mode][i], 72);
+        lv_label_set_long_mode(view->time_label[mode][i], LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(view->time_label[mode][i],
+                                    i == 0 ? LV_TEXT_ALIGN_LEFT :
+                                    i == WX_GRAPH_TIME_LABELS - 1 ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_CENTER,
+                                    LV_PART_MAIN);
+        lv_obj_set_style_text_color(view->time_label[mode][i], THEME_TEXT_MUTED, LV_PART_MAIN);
+        lv_obj_set_style_text_font(view->time_label[mode][i], THEME_FONT_SMALL, LV_PART_MAIN);
     }
 }
 
@@ -3207,17 +3248,17 @@ static void wx_history_graph_slide_create(lv_obj_t *carousel,
     lv_obj_set_style_pad_right(time_row, 52, LV_PART_MAIN);
     lv_obj_clear_flag(time_row, LV_OBJ_FLAG_SCROLLABLE);
 
-    view->time_start[mode] = lv_label_create(time_row);
-    view->time_mid[mode] = lv_label_create(time_row);
-    view->time_end[mode] = lv_label_create(time_row);
-    lv_obj_t *time_labels[3] = {view->time_start[mode], view->time_mid[mode], view->time_end[mode]};
-    for (int i = 0; i < 3; i++) {
-        lv_label_set_text(time_labels[i], "--:--");
-        lv_obj_set_width(time_labels[i], 72);
-        lv_label_set_long_mode(time_labels[i], LV_LABEL_LONG_DOT);
-        lv_obj_set_style_text_align(time_labels[i], i == 0 ? LV_TEXT_ALIGN_LEFT : (i == 1 ? LV_TEXT_ALIGN_CENTER : LV_TEXT_ALIGN_RIGHT), LV_PART_MAIN);
-        lv_obj_set_style_text_color(time_labels[i], THEME_TEXT_MUTED, LV_PART_MAIN);
-        lv_obj_set_style_text_font(time_labels[i], THEME_FONT_SMALL, LV_PART_MAIN);
+    for (uint8_t i = 0; i < WX_GRAPH_TIME_LABELS; i++) {
+        view->time_label[mode][i] = lv_label_create(time_row);
+        lv_label_set_text(view->time_label[mode][i], "--:--");
+        lv_obj_set_width(view->time_label[mode][i], 72);
+        lv_label_set_long_mode(view->time_label[mode][i], LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(view->time_label[mode][i],
+                                    i == 0 ? LV_TEXT_ALIGN_LEFT :
+                                    i == WX_GRAPH_TIME_LABELS - 1 ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_CENTER,
+                                    LV_PART_MAIN);
+        lv_obj_set_style_text_color(view->time_label[mode][i], THEME_TEXT_MUTED, LV_PART_MAIN);
+        lv_obj_set_style_text_font(view->time_label[mode][i], THEME_FONT_SMALL, LV_PART_MAIN);
     }
 }
 
@@ -4109,6 +4150,7 @@ static lv_obj_t *s_theme_opacity_slider;
 static lv_obj_t *s_theme_shadows_sw;
 static lv_obj_t *s_theme_dim_slider;
 static lv_obj_t *s_theme_slideshow_slider;
+static lv_obj_t *s_theme_slideshow_play_label;
 static lv_obj_t *s_theme_opacity_label;
 static lv_obj_t *s_theme_dim_label;
 static lv_obj_t *s_theme_slideshow_label;
@@ -6119,6 +6161,13 @@ static void theme_update_all_swatches(void)
     }
 }
 
+static void theme_update_slideshow_button(bool enabled)
+{
+    if (s_theme_slideshow_play_label) {
+        lv_label_set_text(s_theme_slideshow_play_label, enabled ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+    }
+}
+
 static void theme_collect_controls(app_theme_config_t *cfg)
 {
     if (!cfg) return;
@@ -6180,6 +6229,58 @@ static void theme_dropdown_changed(lv_event_t *e)
     const char *url = theme_background_url(cfg.background_preset, cfg.next_slot);
     snprintf(cfg.background_url, sizeof(cfg.background_url), "%s", url ? url : "");
     (void)app_config_theme_save(&cfg);
+    settings_status_refresh(NULL);
+}
+
+static lv_obj_t *theme_icon_button(lv_obj_t *parent, const char *symbol,
+                                   lv_event_cb_t cb, void *user_data,
+                                   lv_obj_t **out_label)
+{
+    lv_obj_t *btn = lv_button_create(parent);
+    lv_obj_set_size(btn, 62, 50);
+    lv_obj_set_style_radius(btn, 14, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(btn, THEME_BORDER_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, THEME_SURFACE_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, THEME_PRIMARY_COLOR, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_30, LV_PART_MAIN | LV_STATE_PRESSED);
+    if (cb) lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, user_data);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, symbol);
+    lv_obj_set_style_text_font(label, THEME_FONT_BODY, LV_PART_MAIN);
+    lv_obj_set_style_text_color(label, THEME_TEXT_PRIMARY, LV_PART_MAIN);
+    lv_obj_center(label);
+    if (out_label) *out_label = label;
+    return btn;
+}
+
+static void theme_bg_step_clicked(lv_event_t *e)
+{
+    settings_hide_keyboard();
+    intptr_t dir = (intptr_t)lv_event_get_user_data(e);
+    esp_err_t err = theme_save_controls(false);
+    if (err == ESP_OK) err = ui_background_step(dir < 0 ? -1 : 1);
+    if (err == ESP_OK) toast_show(dir < 0 ? "Previous background" : "Next background");
+    else toast_show(err == ESP_ERR_NOT_FOUND ? "No background images" : esp_err_to_name(err));
+    settings_status_refresh(NULL);
+}
+
+static void theme_slideshow_toggle_clicked(lv_event_t *e)
+{
+    (void)e;
+    settings_hide_keyboard();
+    app_theme_config_t cfg;
+    theme_collect_controls(&cfg);
+    cfg.slideshow_enabled = !cfg.slideshow_enabled;
+    esp_err_t err = app_config_theme_save(&cfg);
+    if (err == ESP_OK) {
+        theme_update_slideshow_button(cfg.slideshow_enabled);
+        ui_background_refresh();
+    }
+    toast_show(err == ESP_OK ? (cfg.slideshow_enabled ? "Slideshow playing" : "Slideshow paused") : esp_err_to_name(err));
     settings_status_refresh(NULL);
 }
 
@@ -6392,6 +6493,7 @@ static void theme_settings_load_fields(void)
     }
     if (s_theme_dim_slider) lv_slider_set_value(s_theme_dim_slider, cfg.background_dim_pct, LV_ANIM_OFF);
     if (s_theme_slideshow_slider) lv_slider_set_value(s_theme_slideshow_slider, cfg.slideshow_seconds, LV_ANIM_OFF);
+    theme_update_slideshow_button(cfg.slideshow_enabled);
     s_theme_selected[THEME_COLOR_BACKGROUND] = theme_choice_for_hex(THEME_COLOR_BACKGROUND, cfg.bg_color_hex);
     s_theme_selected[THEME_COLOR_SURFACE] = theme_choice_for_hex(THEME_COLOR_SURFACE, cfg.surface_color_hex);
     s_theme_selected[THEME_COLOR_CARD] = theme_choice_for_hex(THEME_COLOR_CARD, cfg.card_color_hex);
@@ -6602,10 +6704,11 @@ static void settings_status_refresh(lv_timer_t *t)
             snprintf(theme_text, sizeof(theme_text), "%s  %u/%u images ready",
                      preset_label, (unsigned)present, (unsigned)total);
         } else if (theme_cfg.background_enabled && theme_cfg.image_count > 0) {
-            snprintf(theme_text, sizeof(theme_text), "%s  %u image%s  %s  %u%% panels",
+            snprintf(theme_text, sizeof(theme_text), "%s  %u image%s  %s  %s  %u%% panels",
                      preset_label,
                      theme_cfg.image_count,
                      theme_cfg.image_count == 1 ? "" : "s",
+                     theme_cfg.slideshow_enabled ? "playing" : "paused",
                      theme_cfg.background_idle_only ? "idle-only" : "all screens",
                      theme_cfg.surface_opacity_pct);
         } else {
@@ -6614,6 +6717,7 @@ static void settings_status_refresh(lv_timer_t *t)
         }
         label_set_text_if_changed(s_settings_theme_status, theme_text);
         label_set_text_if_changed(s_home_theme_summary, theme_text);
+        theme_update_slideshow_button(theme_cfg.slideshow_enabled);
 
         if (s_theme_download_row) {
             if (!bg_state.busy && !preset_ready) lv_obj_clear_flag(s_theme_download_row, LV_OBJ_FLAG_HIDDEN);
@@ -6938,6 +7042,19 @@ lv_obj_t *screen_settings_create(lv_obj_t *parent)
                                           &s_theme_dim_label);
     s_theme_slideshow_slider = theme_slider_row(theme_card, "Slideshow seconds", 5, 180, 25,
                                                 &s_theme_slideshow_label);
+
+    lv_obj_t *bg_controls = lv_obj_create(theme_card);
+    lv_obj_remove_style_all(bg_controls);
+    lv_obj_set_size(bg_controls, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(bg_controls, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(bg_controls, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(bg_controls, 10, LV_PART_MAIN);
+    lv_obj_clear_flag(bg_controls, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    theme_icon_button(bg_controls, LV_SYMBOL_PREV, theme_bg_step_clicked, (void *)(intptr_t)-1, NULL);
+    theme_icon_button(bg_controls, LV_SYMBOL_PAUSE, theme_slideshow_toggle_clicked, NULL, &s_theme_slideshow_play_label);
+    theme_icon_button(bg_controls, LV_SYMBOL_NEXT, theme_bg_step_clicked, (void *)(intptr_t)1, NULL);
+
     lv_obj_t *theme_btns = settings_button_row(theme_card);
     settings_button(theme_btns, "Save", true, theme_save_clicked);
     settings_button(theme_btns, "Reset", false, theme_clear_clicked);
@@ -7511,7 +7628,7 @@ static void idle_weather_tick_cb(lv_timer_t *t)
         label_set_text_if_changed(s_idle_m_uv, b);
 
         if (w.pressure_hpa) {
-            snprintf(b, sizeof(b), "%.2f in", (double)w.pressure_hpa * 0.02953);
+            wx_format_pressure_inhg(b, sizeof(b), w.pressure_hpa);
         } else snprintf(b, sizeof(b), "--");
         label_set_text_if_changed(s_idle_m_pressure, b);
 
@@ -7529,11 +7646,7 @@ static void idle_weather_tick_cb(lv_timer_t *t)
         } else snprintf(b, sizeof(b), "--");
         label_set_text_if_changed(s_idle_m_gust, b);
 
-        if (w.rain_1h_mm_x10 || w.snow_1h_mm_x10) {
-            snprintf(b, sizeof(b), "R %u.%u  S %u.%u",
-                     w.rain_1h_mm_x10 / 10, w.rain_1h_mm_x10 % 10,
-                     w.snow_1h_mm_x10 / 10, w.snow_1h_mm_x10 % 10);
-        } else snprintf(b, sizeof(b), "0.0 mm/h");
+        wx_format_precip_1h(b, sizeof(b), w.rain_1h_mm_x10, w.snow_1h_mm_x10);
         label_set_text_if_changed(s_idle_m_precip, b);
         idle_bottom_panel_update(false);
     } else {
@@ -7687,6 +7800,17 @@ static void idle_screen_gesture_event(lv_event_t *e)
     idle_manager_dismiss_for_minutes(cfg.idle_swipe_dismiss_min);
 }
 
+static void idle_screen_attach_gestures(lv_obj_t *obj)
+{
+    if (!obj) return;
+    lv_obj_add_event_cb(obj, idle_screen_gesture_event, LV_EVENT_GESTURE, NULL);
+
+    uint32_t child_count = lv_obj_get_child_count(obj);
+    for (uint32_t i = 0; i < child_count; i++) {
+        idle_screen_attach_gestures(lv_obj_get_child(obj, i));
+    }
+}
+
 /* ------------------------------------------------------------
  * Card-based idle layout — current-conditions on the left, clock
  * on the right (icon + temp + Feels Like) inspired by the
@@ -7703,7 +7827,6 @@ lv_obj_t *screen_idle_create(void)
     lv_obj_set_style_pad_row(scr, 6, LV_PART_MAIN);
     lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(scr, idle_screen_gesture_event, LV_EVENT_GESTURE, NULL);
 
     /* Attach background image layer (shared with main screen) */
     ui_background_attach_idle_weather(scr);
@@ -7931,5 +8054,6 @@ lv_obj_t *screen_idle_create(void)
     lv_timer_create(idle_weather_tick_cb, 30000, NULL);
     idle_clock_tick_cb(NULL);
     idle_weather_tick_cb(NULL);
+    idle_screen_attach_gestures(scr);
     return scr;
 }

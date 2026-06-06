@@ -80,7 +80,7 @@ typedef struct {
     char timer_audio_path[APP_TIMER_AUDIO_PATH_MAX];
 } app_tuning_config_t;
 
-#define APP_THEME_MAX_IMAGES 8
+#define APP_THEME_MAX_IMAGES 12
 
 typedef struct {
     bool configured;
@@ -89,6 +89,7 @@ typedef struct {
     uint8_t surface_opacity_pct;
     uint8_t background_dim_pct;
     bool shadows_enabled;
+    bool slideshow_enabled;
     uint16_t slideshow_seconds;
     uint8_t image_count;
     uint8_t next_slot;

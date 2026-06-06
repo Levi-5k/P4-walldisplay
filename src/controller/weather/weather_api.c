@@ -485,15 +485,15 @@ static esp_err_t parse_forecast(const char *json, size_t len, weather_state_t *s
             }
             if (cJSON_IsArray(hour_precip)) {
                 cJSON *precip_node = cJSON_GetArrayItem(hour_precip, i);
-                if (cJSON_IsNumber(precip_node)) hour->precip_mm_x10 = clamp_u16(cJSON_GetNumberValue(precip_node) * 10.0);
+                if (cJSON_IsNumber(precip_node)) hour->precip_in_x100 = clamp_u16(cJSON_GetNumberValue(precip_node) * 100.0);
             }
             if (cJSON_IsArray(hour_rain)) {
                 cJSON *rain_node = cJSON_GetArrayItem(hour_rain, i);
-                if (cJSON_IsNumber(rain_node)) hour->rain_mm_x10 = clamp_u16(cJSON_GetNumberValue(rain_node) * 10.0);
+                if (cJSON_IsNumber(rain_node)) hour->rain_in_x100 = clamp_u16(cJSON_GetNumberValue(rain_node) * 100.0);
             }
             if (cJSON_IsArray(hour_snow)) {
                 cJSON *snow_node = cJSON_GetArrayItem(hour_snow, i);
-                if (cJSON_IsNumber(snow_node)) hour->snow_mm_x10 = clamp_u16(cJSON_GetNumberValue(snow_node) * 10.0);
+                if (cJSON_IsNumber(snow_node)) hour->snow_in_x100 = clamp_u16(cJSON_GetNumberValue(snow_node) * 100.0);
             }
             state->hour_count++;
         }
@@ -558,6 +558,32 @@ static esp_err_t publish_weather_state(const weather_state_t *state)
     return weather_state_set(state);
 }
 
+#if WEATHER_ENABLE_FORECAST
+static void preserve_previous_forecast(weather_state_t *state, const weather_state_t *previous)
+{
+    if (!state || !previous || !previous->valid) return;
+
+    if (previous->day_count) {
+        memcpy(state->days, previous->days, sizeof(state->days));
+        state->day_count = previous->day_count > WEATHER_FORECAST_DAYS ?
+                           WEATHER_FORECAST_DAYS : previous->day_count;
+    }
+    if (previous->hour_count) {
+        memcpy(state->hours, previous->hours, sizeof(state->hours));
+        state->hour_count = previous->hour_count > WEATHER_FORECAST_HOURS ?
+                            WEATHER_FORECAST_HOURS : previous->hour_count;
+    }
+    if (!state->wind_gust_valid && previous->wind_gust_valid) {
+        state->wind_gust_mph_x10 = previous->wind_gust_mph_x10;
+        state->wind_gust_valid = true;
+    }
+    if (!state->uv_index_valid && previous->uv_index_valid) {
+        state->uv_index = previous->uv_index;
+        state->uv_index_valid = true;
+    }
+}
+#endif
+
 static void save_history_after_network_quiet(void)
 {
     weather_state_t state;
@@ -584,6 +610,10 @@ static esp_err_t fetch_once(const weather_config_t *cfg)
     format_coord(lon, sizeof(lon), cfg->lon_x1e6);
 
     weather_state_t state = {0};
+#if WEATHER_ENABLE_FORECAST
+    weather_state_t previous = {0};
+    bool have_previous = weather_state_get(&previous) == ESP_OK && previous.valid;
+#endif
 
     /* --- current observation --- */
     services_status_note_weather(true, false, "Fetching current");
@@ -616,6 +646,10 @@ static esp_err_t fetch_once(const weather_config_t *cfg)
     services_note_weather_timezone(cfg->lat_x1e6, cfg->lon_x1e6,
                                    state.tz_offset_s, state.city, state.country);
 
+#if WEATHER_ENABLE_FORECAST
+    if (have_previous) preserve_previous_forecast(&state, &previous);
+#endif
+
     state.fetched_at_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
     err = publish_weather_state(&state);
     if (err != ESP_OK) return err;
@@ -624,7 +658,7 @@ static esp_err_t fetch_once(const weather_config_t *cfg)
     vTaskDelay(pdMS_TO_TICKS((uint32_t)tuning.weather_forecast_gap_s * 1000u));
     services_status_note_weather(true, false, "Fetching forecast");
     snprintf(url, sizeof(url),
-             "http://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s&current=wind_gusts_10m,uv_index&hourly=temperature_2m,relative_humidity_2m,pressure_msl,precipitation_probability,precipitation,rain,snowfall&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,uv_index_max&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=mm&timezone=auto&forecast_days=%u&forecast_hours=%u",
+             "http://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s&current=wind_gusts_10m,uv_index&hourly=temperature_2m,relative_humidity_2m,pressure_msl,precipitation_probability,precipitation,rain,snowfall&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,uv_index_max&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch&timezone=auto&forecast_days=%u&forecast_hours=%u",
              lat, lon, (unsigned)WEATHER_FORECAST_DAYS, (unsigned)WEATHER_FORECAST_HOURS);
 
     ESP_LOGI(TAG, "weather fetch forecast");
