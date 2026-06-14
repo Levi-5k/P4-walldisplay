@@ -260,9 +260,13 @@ void app_config_tuning_defaults(app_tuning_config_t *out)
     out->weather_graph_cycle_s = 15;
     out->weather_bottom_panel_mode = APP_WEATHER_BOTTOM_PANEL_DATA;
     out->weather_bottom_panel_cycle_s = 30;
+    out->time_sync_interval_min = 1440;
+    out->time_sync_hour = 3;
     out->wled_poll_s = 5;
     out->wled_stale_s = 30;
     out->wled_hue_update_hz = 5;
+    out->light_safety_auto_off_enabled = true;
+    out->light_safety_auto_off_hours = 12;
     out->auto_brightness_enabled = false;
     out->auto_brightness_min_pct = 5;
     out->auto_brightness_max_pct = 100;
@@ -285,8 +289,8 @@ void app_config_tuning_defaults(app_tuning_config_t *out)
     out->timer_snooze_min = 5;
     out->timer_snooze_limit = 3;
     out->timer_default_seconds = 60;
-    out->timer_quick_seconds[0] = 30;
-    out->timer_quick_seconds[1] = 60;
+    out->timer_quick_seconds[0] = 60;
+    out->timer_quick_seconds[1] = 180;
     out->timer_quick_seconds[2] = 300;
     out->timer_quick_seconds[3] = 600;
     for (size_t i = 0; i < APP_TIMER_HISTORY_COUNT; i++) {
@@ -313,10 +317,14 @@ static void app_config_tuning_clamp(app_tuning_config_t *cfg)
     cfg->weather_graph_cycle_s = clamp_u16(cfg->weather_graph_cycle_s, 5, 300);
     cfg->weather_bottom_panel_mode = clamp_u8(cfg->weather_bottom_panel_mode, APP_WEATHER_BOTTOM_PANEL_DATA, APP_WEATHER_BOTTOM_PANEL_CYCLE);
     cfg->weather_bottom_panel_cycle_s = clamp_u16(cfg->weather_bottom_panel_cycle_s, 5, 300);
+    cfg->time_sync_interval_min = clamp_u16(cfg->time_sync_interval_min, 60, 1440);
+    cfg->time_sync_hour = clamp_u8(cfg->time_sync_hour, 0, 23);
     cfg->wled_poll_s = clamp_u8(cfg->wled_poll_s, 2, 30);
     cfg->wled_stale_s = clamp_u8(cfg->wled_stale_s, 10, 120);
     if (cfg->wled_stale_s < cfg->wled_poll_s * 2) cfg->wled_stale_s = cfg->wled_poll_s * 2;
     cfg->wled_hue_update_hz = clamp_u8(cfg->wled_hue_update_hz, 1, 5);
+    cfg->light_safety_auto_off_enabled = cfg->light_safety_auto_off_enabled ? true : false;
+    cfg->light_safety_auto_off_hours = clamp_u8(cfg->light_safety_auto_off_hours, 1, 24);
     cfg->auto_brightness_enabled = cfg->auto_brightness_enabled ? true : false;
     cfg->auto_brightness_min_pct = clamp_u8(cfg->auto_brightness_min_pct, 1, 60);
     cfg->auto_brightness_max_pct = clamp_u8(cfg->auto_brightness_max_pct, 20, 100);
@@ -384,9 +392,15 @@ esp_err_t app_config_tuning_load(app_tuning_config_t *out)
     if (nvs_get_u16(h, "wx_graph_cyc", &u16) == ESP_OK) out->weather_graph_cycle_s = u16;
     if (nvs_get_u8(h, "wx_btm", &u8) == ESP_OK) out->weather_bottom_panel_mode = u8;
     if (nvs_get_u16(h, "wx_btm_cyc", &u16) == ESP_OK) out->weather_bottom_panel_cycle_s = u16;
+    bool have_time_sync_hour = nvs_get_u8(h, "tsync_hr", &u8) == ESP_OK;
+    if (have_time_sync_hour) out->time_sync_hour = u8;
+    if (nvs_get_u16(h, "tsync_min", &u16) == ESP_OK) out->time_sync_interval_min = u16;
+    if (!have_time_sync_hour && out->time_sync_interval_min == 60) out->time_sync_interval_min = 1440;
     if (nvs_get_u8(h, "wl_poll", &u8) == ESP_OK) out->wled_poll_s = u8;
     if (nvs_get_u8(h, "wl_stale", &u8) == ESP_OK) out->wled_stale_s = u8;
     if (nvs_get_u8(h, "wl_hue_hz", &u8) == ESP_OK) out->wled_hue_update_hz = u8;
+    if (nvs_get_u8(h, "lt_safe_on", &u8) == ESP_OK) out->light_safety_auto_off_enabled = u8 != 0;
+    if (nvs_get_u8(h, "lt_safe_hr", &u8) == ESP_OK) out->light_safety_auto_off_hours = u8;
     if (nvs_get_u8(h, "bl_auto", &u8) == ESP_OK) out->auto_brightness_enabled = u8 != 0;
     if (nvs_get_u8(h, "bl_min", &u8) == ESP_OK) out->auto_brightness_min_pct = u8;
     if (nvs_get_u8(h, "bl_max", &u8) == ESP_OK) out->auto_brightness_max_pct = u8;
@@ -413,6 +427,10 @@ esp_err_t app_config_tuning_load(app_tuning_config_t *out)
     if (nvs_get_u16(h, "tmr_q2", &u16) == ESP_OK) out->timer_quick_seconds[1] = u16;
     if (nvs_get_u16(h, "tmr_q3", &u16) == ESP_OK) out->timer_quick_seconds[2] = u16;
     if (nvs_get_u16(h, "tmr_q4", &u16) == ESP_OK) out->timer_quick_seconds[3] = u16;
+    if (out->timer_quick_seconds[0] == 30 && out->timer_quick_seconds[1] == 60) {
+        out->timer_quick_seconds[0] = 60;
+        out->timer_quick_seconds[1] = 180;
+    }
     if (nvs_get_u16(h, "tmr_h1", &u16) == ESP_OK) out->timer_history_seconds[0] = u16;
     if (nvs_get_u16(h, "tmr_h2", &u16) == ESP_OK) out->timer_history_seconds[1] = u16;
     if (nvs_get_u16(h, "tmr_h3", &u16) == ESP_OK) out->timer_history_seconds[2] = u16;
@@ -451,9 +469,13 @@ esp_err_t app_config_tuning_save(const app_tuning_config_t *cfg)
     if (err == ESP_OK) err = nvs_set_u16(h, "wx_graph_cyc", clean.weather_graph_cycle_s);
     if (err == ESP_OK) err = nvs_set_u8(h, "wx_btm", clean.weather_bottom_panel_mode);
     if (err == ESP_OK) err = nvs_set_u16(h, "wx_btm_cyc", clean.weather_bottom_panel_cycle_s);
+    if (err == ESP_OK) err = nvs_set_u16(h, "tsync_min", clean.time_sync_interval_min);
+    if (err == ESP_OK) err = nvs_set_u8(h, "tsync_hr", clean.time_sync_hour);
     if (err == ESP_OK) err = nvs_set_u8(h, "wl_poll", clean.wled_poll_s);
     if (err == ESP_OK) err = nvs_set_u8(h, "wl_stale", clean.wled_stale_s);
     if (err == ESP_OK) err = nvs_set_u8(h, "wl_hue_hz", clean.wled_hue_update_hz);
+    if (err == ESP_OK) err = nvs_set_u8(h, "lt_safe_on", clean.light_safety_auto_off_enabled ? 1 : 0);
+    if (err == ESP_OK) err = nvs_set_u8(h, "lt_safe_hr", clean.light_safety_auto_off_hours);
     if (err == ESP_OK) err = nvs_set_u8(h, "bl_auto", clean.auto_brightness_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u8(h, "bl_min", clean.auto_brightness_min_pct);
     if (err == ESP_OK) err = nvs_set_u8(h, "bl_max", clean.auto_brightness_max_pct);

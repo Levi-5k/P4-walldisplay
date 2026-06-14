@@ -3,6 +3,8 @@
 #include "app_config.h"
 #include "audio_library.h"
 #include "audio_out.h"
+#include "sd_error_log.h"
+#include "sd_storage.h"
 #include "ui_background.h"
 #include "wled_state.h"
 
@@ -110,7 +112,8 @@ static bool serial_debug_read_byte(uint8_t *ch)
 
 static void serial_debug_help(void)
 {
-    serial_debug_reply("commands: help, heap, bg help, audio help, rs485 help");
+    serial_debug_reply("commands: help, heap, sd help, bg help, audio help, rs485 help");
+    serial_debug_reply("sd: sd status, sd log [count], sd flush, sd clear");
     serial_debug_reply("bg: bg status, bg download [preset], bg delete");
     serial_debug_reply("audio: audio status, audio test, audio list, audio assets, audio download, audio play <file|#>, audio stop");
     serial_debug_reply("rs485: rs485 status, rs485 ping, rs485 provision, rs485 send <json>");
@@ -141,6 +144,107 @@ static void handle_heap_command(void)
     serial_debug_heap_line("internal", MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     serial_debug_heap_line("dma", MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
     serial_debug_heap_line("psram", MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+static void handle_sd_status(void)
+{
+    sd_storage_status_t storage;
+    sd_storage_status_get(&storage);
+
+    sd_error_log_status_t log;
+    sd_error_log_status_get(&log);
+
+    serial_debug_reply("sd mounted=%s paused=%s network_busy=%s last=%s '%s'",
+                       yesno(storage.mounted), yesno(storage.paused), yesno(storage.network_busy),
+                       esp_err_to_name(storage.last_err), storage.last_error);
+    serial_debug_reply("sd log path=%s buffer=%u%s recorded=%u pending=%u flushed=%u dropped=%u",
+                       sd_error_log_path(), (unsigned)log.capacity,
+                       log.using_fallback ? " fallback" : " psram",
+                       (unsigned)log.recorded, (unsigned)log.pending,
+                       (unsigned)log.flushed, (unsigned)log.dropped);
+    serial_debug_reply("sd log failures=%u flushing=%s last_flush=%s '%s'",
+                       (unsigned)log.flush_failures, yesno(log.flushing),
+                       esp_err_to_name(log.last_flush_err), log.last_flush_detail);
+}
+
+static unsigned parse_count_arg(char *args, unsigned fallback, unsigned max_value)
+{
+    char *cursor = args;
+    char *arg = next_token(&cursor);
+    if (!arg) return fallback;
+
+    char *end = NULL;
+    long value = strtol(arg, &end, 10);
+    if (!end || *trim_ws(end) != '\0' || value <= 0) return fallback;
+    if ((unsigned)value > max_value) return max_value;
+    return (unsigned)value;
+}
+
+static void handle_sd_log(char *args)
+{
+    unsigned limit = parse_count_arg(args, 8, 24);
+    sd_error_log_entry_t *entries = heap_caps_calloc(limit, sizeof(*entries),
+                                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!entries) entries = calloc(limit, sizeof(*entries));
+    if (!entries) {
+        serial_debug_reply("sd log failed: no memory");
+        return;
+    }
+
+    size_t count = sd_error_log_recent(entries, limit);
+    if (count == 0) {
+        serial_debug_reply("sd log: no recent RAM entries; file=%s", sd_error_log_path());
+        free(entries);
+        return;
+    }
+
+    serial_debug_reply("sd log: showing %u recent RAM entries; file=%s", (unsigned)count, sd_error_log_path());
+    for (size_t i = 0; i < count; i++) {
+        const sd_error_log_entry_t *entry = &entries[i];
+        serial_debug_reply("#%u +%ums %s/%s %s errno=%d path='%s' detail='%s'",
+                           (unsigned)entry->seq, (unsigned)entry->uptime_ms,
+                           entry->source, entry->operation,
+                           esp_err_to_name(entry->err), entry->errno_value,
+                           entry->path[0] ? entry->path : "-",
+                           entry->detail[0] ? entry->detail : "-");
+    }
+    free(entries);
+}
+
+static void handle_sd_flush(void)
+{
+    esp_err_t err = sd_error_log_flush();
+    sd_error_log_status_t log;
+    sd_error_log_status_get(&log);
+    serial_debug_reply("sd flush %s: pending=%u flushed=%u last='%s'",
+                       err == ESP_OK ? "ok" : esp_err_to_name(err),
+                       (unsigned)log.pending, (unsigned)log.flushed,
+                       log.last_flush_detail);
+}
+
+static void handle_sd_clear(void)
+{
+    esp_err_t err = sd_error_log_clear();
+    serial_debug_reply("sd clear %s", err == ESP_OK ? "ok" : esp_err_to_name(err));
+}
+
+static void handle_sd_command(char *args)
+{
+    char *cursor = args;
+    char *sub = next_token(&cursor);
+    if (!sub || strcasecmp(sub, "help") == 0) {
+        serial_debug_reply("sd commands: sd status, sd log [count], sd flush, sd clear");
+    } else if (strcasecmp(sub, "status") == 0 || strcasecmp(sub, "stat") == 0) {
+        handle_sd_status();
+    } else if (strcasecmp(sub, "log") == 0 || strcasecmp(sub, "tail") == 0) {
+        handle_sd_log(cursor);
+    } else if (strcasecmp(sub, "flush") == 0 || strcasecmp(sub, "sync") == 0) {
+        handle_sd_flush();
+    } else if (strcasecmp(sub, "clear") == 0 || strcasecmp(sub, "reset") == 0) {
+        handle_sd_clear();
+    } else {
+        serial_debug_reply("unknown sd command '%s'", sub);
+    }
 }
 
 static void handle_rs485_status(void)
@@ -492,6 +596,8 @@ static void handle_serial_line(char *line)
         handle_bg_command(cursor);
     } else if (strcasecmp(cmd, "audio") == 0 || strcasecmp(cmd, "sound") == 0) {
         handle_audio_command(cursor);
+    } else if (strcasecmp(cmd, "sd") == 0 || strcasecmp(cmd, "card") == 0 || strcasecmp(cmd, "storage") == 0) {
+        handle_sd_command(cursor);
     } else if (strcasecmp(cmd, "rs485") == 0 || strcasecmp(cmd, "wled") == 0) {
         handle_rs485_command(cursor);
     } else if (strcasecmp(cmd, "heap") == 0 || strcasecmp(cmd, "mem") == 0) {

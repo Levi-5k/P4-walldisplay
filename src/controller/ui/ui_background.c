@@ -353,6 +353,41 @@ static void drop_current_image_cache(void)
     }
 }
 
+static void background_apply_geometry(bg_screen_t *s)
+{
+    if (!s || !s->layer) return;
+
+    lv_obj_t *screen = lv_obj_get_parent(s->layer);
+    lv_display_t *display = screen ? lv_obj_get_display(screen) : lv_display_get_default();
+    if (!display) display = lv_display_get_default();
+
+    int32_t screen_w = display ? lv_display_get_horizontal_resolution(display) : 720;
+    int32_t screen_h = display ? lv_display_get_vertical_resolution(display) : 720;
+    if (screen) {
+        int32_t obj_w = lv_obj_get_width(screen);
+        int32_t obj_h = lv_obj_get_height(screen);
+        if (obj_w > screen_w) screen_w = obj_w;
+        if (obj_h > screen_h) screen_h = obj_h;
+    }
+    if (screen_w <= 0) screen_w = 720;
+    if (screen_h <= 0) screen_h = 720;
+
+    int32_t pad_left = screen ? lv_obj_get_style_space_left(screen, LV_PART_MAIN) : 0;
+    int32_t pad_top = screen ? lv_obj_get_style_space_top(screen, LV_PART_MAIN) : 0;
+
+    lv_obj_set_pos(s->layer, -pad_left, -pad_top);
+    lv_obj_set_size(s->layer, screen_w, screen_h);
+
+    if (s->image) {
+        lv_obj_set_pos(s->image, 0, 0);
+        lv_obj_set_size(s->image, LV_PCT(100), LV_PCT(100));
+    }
+    if (s->scrim) {
+        lv_obj_set_pos(s->scrim, 0, 0);
+        lv_obj_set_size(s->scrim, LV_PCT(100), LV_PCT(100));
+    }
+}
+
 static bool find_existing_slot(const app_theme_config_t *cfg, uint8_t start, uint8_t *slot)
 {
     if (!cfg || cfg->image_count == 0) return false;
@@ -483,6 +518,7 @@ static void clear_background_for_download(void)
     for (uint8_t i = 0; i < s_screen_count; i++) {
         bg_screen_t *s = &s_screens[i];
         if (!s->layer || !s->image || !s->scrim) continue;
+        background_apply_geometry(s);
         lv_image_set_src(s->image, NULL);
         lv_obj_add_flag(s->image, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_style_bg_color(s->layer, THEME_BG_COLOR, LV_PART_MAIN);
@@ -512,18 +548,26 @@ static void apply_background(void)
     if (app_config_theme_load(&cfg) != ESP_OK) app_config_theme_defaults(&cfg);
     theme_apply_config(&cfg);
 
+    bool wants_slideshow = cfg.background_enabled && cfg.slideshow_enabled && cfg.image_count > 1;
+    uint32_t slideshow_period_ms = 0;
+    if (wants_slideshow) {
+        uint32_t period = cfg.slideshow_seconds;
+        if (period < 5) period = 5;
+        slideshow_period_ms = period * 1000u;
+    }
+
     if (s_screen_count == 0) {
         ESP_LOGW(TAG, "apply_background: no screens attached");
         return;
     }
 
-    stop_timer();
     drop_current_image_cache();
 
     /* Reset all attached screens to default state */
     for (uint8_t i = 0; i < s_screen_count; i++) {
         bg_screen_t *s = &s_screens[i];
         if (!s->layer || !s->image || !s->scrim) continue;
+        background_apply_geometry(s);
         lv_obj_add_flag(s->image, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_style_bg_color(s->layer, THEME_BG_COLOR, LV_PART_MAIN);
         lv_obj_set_style_bg_opa(s->layer, LV_OPA_COVER, LV_PART_MAIN);
@@ -531,6 +575,7 @@ static void apply_background(void)
     }
 
     if (!cfg.background_enabled || cfg.image_count == 0) {
+        stop_timer();
         return;
     }
 
@@ -624,6 +669,7 @@ static void apply_background(void)
         bg_screen_t *s = &s_screens[i];
         if (!s->layer || !s->image || !s->scrim) continue;
         if (cfg.background_idle_only && !s->idle_weather) continue;
+        background_apply_geometry(s);
         lv_image_set_src(s->image, &s_raw_dsc);
         lv_obj_clear_flag(s->image, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_background(s->layer);
@@ -632,10 +678,19 @@ static void apply_background(void)
         applied_to_any_screen = true;
     }
 
-    if (applied_to_any_screen && cfg.slideshow_enabled && cfg.image_count > 1) {
-        uint32_t period = cfg.slideshow_seconds;
-        if (period < 5) period = 5;
-        s_timer = lv_timer_create(slide_timer_cb, period * 1000u, NULL);
+    if (!wants_slideshow) {
+        stop_timer();
+    } else if (s_timer) {
+        lv_timer_set_period(s_timer, slideshow_period_ms);
+        lv_timer_reset(s_timer);
+    } else {
+        s_timer = lv_timer_create(slide_timer_cb, slideshow_period_ms, NULL);
+    }
+
+    if (!applied_to_any_screen && !s_timer && wants_slideshow) {
+        /* Keep retrying when an image is temporarily unavailable so slideshow
+         * can recover without manual refresh. */
+        s_timer = lv_timer_create(slide_timer_cb, slideshow_period_ms, NULL);
     }
 }
 
@@ -675,7 +730,6 @@ static void ui_background_attach_common(lv_obj_t *screen, bool idle_weather)
 
     s->layer = lv_obj_create(screen);
     lv_obj_remove_style_all(s->layer);
-    lv_obj_set_size(s->layer, LV_PCT(100), LV_PCT(100));
     lv_obj_add_flag(s->layer, LV_OBJ_FLAG_FLOATING);
     lv_obj_clear_flag(s->layer, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(s->layer, THEME_BG_COLOR, LV_PART_MAIN);
@@ -689,9 +743,9 @@ static void ui_background_attach_common(lv_obj_t *screen, bool idle_weather)
 
     s->scrim = lv_obj_create(s->layer);
     lv_obj_remove_style_all(s->scrim);
-    lv_obj_set_size(s->scrim, LV_PCT(100), LV_PCT(100));
     lv_obj_clear_flag(s->scrim, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 
+    background_apply_geometry(s);
     lv_obj_move_background(s->layer);
     s_screen_count++;
     apply_background();

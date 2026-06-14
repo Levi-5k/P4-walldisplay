@@ -46,9 +46,13 @@ typedef struct {
     uint16_t weather_graph_cycle_s;
     uint8_t weather_bottom_panel_mode;
     uint16_t weather_bottom_panel_cycle_s;
+    uint16_t time_sync_interval_min;
+    uint8_t time_sync_hour;
     uint8_t wled_poll_s;
     uint8_t wled_stale_s;
     uint8_t wled_hue_update_hz;
+    bool light_safety_auto_off_enabled;
+    uint8_t light_safety_auto_off_hours;
     bool auto_brightness_enabled;
     uint8_t auto_brightness_min_pct;
     uint8_t auto_brightness_max_pct;

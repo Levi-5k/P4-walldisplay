@@ -27,11 +27,11 @@ The selected S3 board is Waveshare `ESP32-S3-Relay-1CH`, SKU `32152`, Part No. `
 - S3 RS-485 pins: UART1, TX GPIO17, RX GPIO18, DE/RE GPIO21.
 - Waveshare's product page describes RS-485 direction as controlled by main-controller hardware flow settings; the pinout image labels GPIO21 as RS485 EN. The overlay drives GPIO21 manually through the bridge usermod.
 - P4 TX command payload limit: less than 512 bytes, before the newline.
-- P4 RX line limit: 2048 bytes. S3 snapshots must stay comfortably below this.
+- P4 RX line limit: 16384 bytes. S3 snapshots must stay comfortably below this; the larger budget is for the named WLED preset list.
 - S3 bridge RX line limit: 1536 bytes by default.
 - Poll cadence: P4 sends `{"v":true}` every 5 seconds.
 - Online timeout: P4 marks WLED stale after 30 seconds without a valid response.
-- The S3 bridge now treats the P4 poll/request stream as the primary link heartbeat. After it sees a valid P4 JSON frame, it stops sending periodic unsolicited snapshots and only responds to P4 requests/commands, preventing half-duplex collisions with the 5-second poll cadence. If the P4 goes stale for 30 seconds, the bridge returns to low-rate reconnect announcements every 15 seconds, only after the RS-485 bus has been quiet.
+- The S3 bridge now treats the P4 poll/request stream as the primary link heartbeat. After it sees a valid P4 JSON frame, it stops sending periodic unsolicited snapshots and only responds to P4 requests/commands, preventing half-duplex collisions with the 5-second poll cadence. If the P4 goes stale for 30 seconds, the bridge returns to low-rate reconnect announcements every 15 seconds, only after the RS-485 bus has been quiet. If the bridge boots but never receives a valid P4 frame, it restarts the RS-485 UART/DE hardware on a cold-start watchdog so communication can recover without opening a USB monitor.
 - The S3 bridge drives RS-485 DE with a short settle/hold delay around each transmitted line and discards partial RX lines after 1.2 seconds of idle time. Oversized lines are dropped until newline so one bad frame cannot repeatedly collide with new traffic.
 
 ## State Commands From P4
@@ -53,7 +53,12 @@ These JSON keys must be accepted by the S3 bridge and forwarded into WLED's stat
 | `seg[0].c2` | 0..255 | Lights effect parameter controls | WLED effect custom slider 2. |
 | `seg[0].c3` | 0..255 | Lights effect parameter controls | WLED effect custom slider 3. |
 | `seg[0].col` | up to three RGB triples, each channel 0..255 | Lights primary and secondary color controls | Segment color slots; P4 currently edits `col[0]` and `col[1]` while preserving `col[2]` from readback. |
-| `ps` | WLED preset ID; current UI sends `1..64` | Lights preset strip/grid | Apply a saved WLED preset. |
+| `ps` | WLED preset ID; current UI sends `1..250` | Lights preset panels/command menu | Apply a saved WLED preset. |
+| `psave` | WLED preset ID; current UI sends `1..250` | Lights preset panels/command menu | Save current WLED state into a preset slot. |
+| `n` | string, used with `psave` | Lights preset panel name field | WLED preset name stored in `/presets.json`. |
+| `pdel` | WLED preset ID; current UI sends `1..250` | Lights preset panel delete action/command menu | Delete a WLED preset slot. |
+| `np` | boolean | Lights preset panels/command menu | Advance to WLED's next preset. |
+| `playlist` | object with `ps`, `dur`, `transition`, `repeat`, `end` | Lights preset panels/command menu | Start a WLED playlist generated from selected preset options. |
 | `rb` | boolean; current UI sends `true` | Settings > WLED > Reboot S3 | Reboot the WLED node. |
 
 Example state update emitted by the P4 LED state publisher:
@@ -74,6 +79,10 @@ Example direct controls from the Lights page:
 {"seg":[{"c3":16}]}
 {"seg":[{"col":[[255,64,0],[0,64,255],[0,0,0]]}]}
 {"ps":3}
+{"psave":3,"n":"Evening","ib":true,"sb":true,"sc":true}
+{"pdel":3}
+{"np":true}
+{"playlist":{"ps":[3,4],"dur":[100,100],"transition":[7,7],"repeat":0,"end":0}}
 ```
 
 ## Provisioning Config From P4
@@ -110,13 +119,15 @@ Audio sync is UDP, not RS-485 JSON. The S3 firmware must use WLED-MM/MoonModules
 
 ## Snapshot Fields Read By P4
 
-The P4 polls with `{"v":true}` and parses these response fields. The S3 bridge intentionally compacts snapshots to this set so the response fits inside the P4 2048-byte receive line.
+The P4 polls with `{"v":true}` and parses these response fields. The S3 bridge intentionally compacts snapshots to this set so the response fits inside the P4 16384-byte receive line.
 
 | JSON path | Type/range | P4 use |
 | --- | --- | --- |
 | `state.on` | boolean | Reconcile P4 power state. |
 | `state.bri` | 0..255 | Reconcile P4 brightness percentage. |
 | `state.transition` | WLED transition value | Stored in `wled_state_t` for status/readback. |
+| `state.ps` | integer, `-1`/missing when no active preset | Lights preset active-panel state. |
+| `state.pl` | integer, `-1`/missing when no active playlist | Lights preset panel playlist readback. |
 | `state.seg[0].fx` | 0..255 | Lights page effect label and next/previous baseline. |
 | `state.seg[0].pal` | 0..255 | Lights page palette label and next/previous baseline. |
 | `state.seg[0].sx` | 0..255 | Lights page speed slider sync. |
@@ -140,6 +151,8 @@ The P4 polls with `{"v":true}` and parses these response fields. The S3 bridge i
 | `info.rs485.err` | integer | Count of parse, unsupported command, line timeout, or overflow errors seen by the S3 bridge. |
 | `info.rs485.tx` | integer | Count of compact snapshots transmitted by the S3 bridge. |
 | `info.rs485.ageMs` | integer | Milliseconds since the last valid P4 frame, from the S3 bridge's perspective. |
+| `presets` | array of compact `[id,name]` entries | Lights Presets tab renders one WLED-style expandable panel per saved preset. |
+| `ptrunc` | boolean, optional | Indicates the bridge capped the returned preset list. |
 
 ## P4 Local Settings That Affect WLED
 
@@ -172,6 +185,7 @@ These are not runtime settings the P4 changes over RS-485. The board-level items
 | `USERMOD_86BOX_RS485_RX` | `18` | S3 UART RX GPIO. |
 | `USERMOD_86BOX_RS485_DE` | `21` | GPIO21 is labeled RS485 EN on the provided pinout. |
 | `USERMOD_86BOX_RS485_BAUD` | `115200` | Must match P4 `BSP_RS485_BAUD`. |
+| `ARDUINO_USB_CDC_ON_BOOT` | `0` | Keep the S3 WLED app headless; enabling CDC-on-boot can make startup depend on opening a USB serial monitor. |
 | `LEDPIN` / `DATA_PINS` | `1` | First-boot LED output GPIO; WLED web field maps to `hw.led.ins[0].pin`. |
 | `DEFAULT_LED_COUNT` / `PIXEL_COUNTS` | `300` | First-boot LED count; WLED web field maps to `hw.led.ins[0].len`. |
 | `PIXEL_TYPE` | WLED default unless overridden | Set LED chipset/type on the WLED web page; config maps to `hw.led.ins[0].type`. |

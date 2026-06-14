@@ -22,6 +22,7 @@ The command set is also discoverable from the device:
 
 ```text
 help
+sd help
 bg help
 audio help
 rs485 help
@@ -34,7 +35,30 @@ Top-level aliases:
 | `?` | `help` |
 | `background` | `bg` |
 | `sound` | `audio` |
+| `card` | `sd` |
+| `storage` | `sd` |
 | `wled` | `rs485` |
+
+## SD Error Log Commands
+
+SD errors are buffered in RAM first, so failures can still be inspected when the card is missing, paused for network traffic, or temporarily unwritable. When SD access is safe again, pending entries are appended to `/sdcard/logs/sd_errors.csv`; older logs rotate to `/sdcard/logs/sd_errors.prev.csv`.
+
+| Command | Purpose |
+| --- | --- |
+| `sd status` | Show SD mount/guard state, last storage error, RAM buffer counters, and persistent log path. |
+| `sd log [count]` | Print recent RAM-buffered SD error entries. Defaults to 8 entries and caps at 24. |
+| `sd flush` | Force pending RAM entries to append to the SD CSV log if SD access is currently safe. |
+| `sd clear` | Remove current and rotated SD log files and reset the RAM counters. |
+| `sd help` | Print SD command help. |
+
+Aliases:
+
+| Alias | Equivalent |
+| --- | --- |
+| `sd stat` | `sd status` |
+| `sd tail` | `sd log` |
+| `sd sync` | `sd flush` |
+| `sd reset` | `sd clear` |
 
 ## Background Commands
 

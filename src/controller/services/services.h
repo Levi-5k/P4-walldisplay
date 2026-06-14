@@ -90,6 +90,9 @@ bool services_network_bulk_active(void);
 /* Retry IP-based location lookup when weather needs coordinates after boot. */
 esp_err_t services_location_request_refresh(void);
 
+/* Apply the saved periodic SNTP interval and resync if Wi-Fi is connected. */
+esp_err_t services_time_sync_apply_tuning(void);
+
 /* Blocking Wi-Fi scan. Returns up to max_results visible SSIDs sorted by the driver. */
 esp_err_t wifi_scan_networks(wifi_scan_result_t *results, size_t max_results, size_t *result_count);
 

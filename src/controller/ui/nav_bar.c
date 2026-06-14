@@ -67,13 +67,13 @@ static lv_obj_t *icon_btn(lv_obj_t *parent, const char *sym, const char *cap,
     /* Wider pill buttons (was a 76px circle); 31px radius keeps rounded ends. */
     lv_obj_set_size(b, 132, 62);
     lv_obj_set_style_radius(b, 31, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(b, lv_color_hex(0x0A0D18), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(b, THEME_SURFACE_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(b, theme_surface_opa(), LV_PART_MAIN);
     lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
     lv_obj_set_style_shadow_opa(b, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_shadow_color(b, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_border_width(b, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(b, lv_color_hex(0x222B45), LV_PART_MAIN);
+    lv_obj_set_style_border_color(b, THEME_BORDER_COLOR, LV_PART_MAIN);
     lv_obj_set_style_border_color(b, THEME_PRIMARY_COLOR, LV_PART_MAIN | LV_STATE_CHECKED);
     lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_CHECKED);
     lv_obj_set_style_bg_color(b, THEME_PRIMARY_COLOR, LV_PART_MAIN | LV_STATE_CHECKED);

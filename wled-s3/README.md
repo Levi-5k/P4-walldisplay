@@ -48,7 +48,7 @@ The helper copies the overlay files, including a small esptool compatibility scr
 
 ## Protocol Notes
 
-The bridge usermod is intentionally small. It reads one JSON object per line from RS-485, applies state JSON through WLED's JSON state API, applies config JSON through WLED's config API when available, and writes a compact state/info snapshot back to the P4. The snapshot is trimmed to stay under the P4 RS-485 receive line limit and includes small RS-485 counters for diagnostics.
+The bridge usermod is intentionally small. It reads one JSON object per line from RS-485, applies state JSON through WLED's JSON state API, applies config JSON through WLED's config API when available, and writes a compact state/info snapshot plus named preset list back to the P4. The snapshot is trimmed to stay under the P4 RS-485 receive line limit and includes small RS-485 counters for diagnostics.
 
 The P4's `{"v":true}` poll is the normal heartbeat. After the S3 sees valid P4 traffic it only transmits in response to P4 requests/commands, which keeps the half-duplex bus from colliding with independent periodic snapshots. If the P4 link times out, the S3 sends low-rate reconnect announcements only after the bus has been quiet.
 

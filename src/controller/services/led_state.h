@@ -43,6 +43,7 @@ void led_state_persist_current(void);
 void led_state_hold_power_on_for(uint32_t duration_ms);
 void led_state_clear_power_on_hold(void);
 bool led_state_power_on_hold_active(void);
+void led_state_safety_check_now(void);
 
 void led_state_set_kelvin_min(uint16_t k_min);
 void led_state_set_kelvin_max(uint16_t k_max);

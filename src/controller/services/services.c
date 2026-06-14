@@ -50,12 +50,16 @@ static const char *TAG = "services";
 
 #define CMD_QUEUE_LEN       16
 #define CMD_JSON_MAX        512
+#define RS485_RX_LINE_MAX   16384
+#define RS485_UART_BUF_SIZE 8192
 #define CMD_TX_REPLY_GUARD_MS 200u
 #define CMD_TX_TASK_STACK_BYTES 4096
 #define RS485_RX_TASK_STACK_BYTES 8192
 #define GEOIP_TASK_STACK_BYTES 6144
 #define TIME_SYNC_TASK_STACK_BYTES 4096
+#define TIME_SYNC_SCHED_TASK_STACK_BYTES 4096
 #define TIME_VALID_MIN_EPOCH 1704067200LL
+#define TIME_SYNC_RETRY_MS 60000u
 #define WLED_PROVISION_INITIAL_RETRY_MS 60000u
 #define WLED_PROVISION_MAX_RETRY_MS     300000u
 #define WLED_PROBE_ATTEMPTS 3u
@@ -76,6 +80,7 @@ static TaskHandle_t      s_provision_task;
 static volatile bool     s_provision_force_requested;
 static TaskHandle_t      s_geoip_task;
 static TaskHandle_t      s_time_sync_task;
+static TaskHandle_t      s_time_sync_sched_task;
 static SemaphoreHandle_t s_status_mtx;
 static SemaphoreHandle_t s_https_mtx;    /* exclusive HTTPS-over-SDIO lock */
 static EventGroupHandle_t s_wifi_events;
@@ -131,6 +136,11 @@ static bool time_before_deadline(uint32_t now_ms, uint32_t deadline_ms)
 static void note_wled_local_echo_hold(void)
 {
     s_wled_local_echo_hold_until_ms = services_now_ms() + WLED_LOCAL_ECHO_HOLD_MS;
+}
+
+static void time_sync_schedule_notify(void)
+{
+    if (s_time_sync_sched_task) xTaskNotifyGive(s_time_sync_sched_task);
 }
 
 static bool wled_local_echo_hold_active(void)
@@ -402,6 +412,7 @@ void services_note_weather_timezone(int32_t lat_x1e6, int32_t lon_x1e6,
     s_status.location_lon_x1e6 = lon_x1e6;
     status_unlock();
     ESP_LOGI(TAG, "Weather timezone applied: %s", timezone);
+    time_sync_schedule_notify();
 }
 
 static int32_t geo_round_x1e6(double value)
@@ -568,6 +579,7 @@ static esp_err_t geoip_apply_result(const geoip_result_t *result, const char *pr
     apply_timezone_offset(result->offset_sec);
     status_note_location(true, result->area, result->timezone, result->offset_sec,
                          result->has_coords, result->lat_x1e6, result->lon_x1e6);
+    time_sync_schedule_notify();
 
     if (result->has_coords) {
         esp_err_t save_err = app_config_weather_save_location(result->lat_x1e6, result->lon_x1e6);
@@ -681,6 +693,50 @@ static bool system_time_is_valid(void)
     return (int64_t)now >= TIME_VALID_MIN_EPOCH;
 }
 
+static uint16_t time_sync_interval_min_from_tuning(void)
+{
+    app_tuning_config_t tuning;
+    if (app_config_tuning_load(&tuning) != ESP_OK) app_config_tuning_defaults(&tuning);
+    if (tuning.time_sync_interval_min < 60) tuning.time_sync_interval_min = 60;
+    if (tuning.time_sync_interval_min > 1440) tuning.time_sync_interval_min = 1440;
+    return tuning.time_sync_interval_min;
+}
+
+static uint8_t time_sync_hour_from_tuning(void)
+{
+    app_tuning_config_t tuning;
+    if (app_config_tuning_load(&tuning) != ESP_OK) app_config_tuning_defaults(&tuning);
+    return tuning.time_sync_hour < 24 ? tuning.time_sync_hour : 3;
+}
+
+static uint32_t time_sync_interval_ms_from_tuning(void)
+{
+    return (uint32_t)time_sync_interval_min_from_tuning() * 60u * 1000u;
+}
+
+static uint32_t time_sync_delay_ms_from_tuning(void)
+{
+    if (!system_time_is_valid()) return TIME_SYNC_RETRY_MS;
+
+    time_t now = time(NULL);
+    struct tm target;
+    localtime_r(&now, &target);
+    target.tm_hour = time_sync_hour_from_tuning();
+    target.tm_min = 0;
+    target.tm_sec = 0;
+
+    time_t target_time = mktime(&target);
+    int64_t interval_s = (int64_t)time_sync_interval_min_from_tuning() * 60LL;
+    if (interval_s < 3600LL) interval_s = 3600LL;
+    if (interval_s > 86400LL) interval_s = 86400LL;
+
+    while (target_time <= now) target_time += (time_t)interval_s;
+    int64_t delay_s = (int64_t)(target_time - now);
+    if (delay_s < 60LL) delay_s = 60LL;
+    if (delay_s > 86400LL) delay_s = 86400LL;
+    return (uint32_t)delay_s * 1000u;
+}
+
 static void sntp_sync_cb(struct timeval *tv)
 {
     time_t now = tv ? (time_t)tv->tv_sec : time(NULL);
@@ -699,6 +755,8 @@ static void sntp_sync_cb(struct timeval *tv)
 static void start_sntp_once(void)
 {
     bool valid = system_time_is_valid();
+    uint16_t interval_min = time_sync_interval_min_from_tuning();
+    esp_sntp_set_sync_interval((uint32_t)interval_min * 60u * 1000u);
     if (s_sntp_started) {
         status_note_time_sync(true, valid, valid ? "Synced" : "Syncing");
         return;
@@ -716,7 +774,48 @@ static void start_sntp_once(void)
     esp_sntp_init();
     s_sntp_started = true;
     status_note_time_sync(true, valid, valid ? "Synced" : "Syncing");
-    ESP_LOGI(TAG, "SNTP started (%d server slots)", CONFIG_LWIP_SNTP_MAX_SERVERS);
+    ESP_LOGI(TAG, "SNTP started (%d server slots, %u min interval)",
+             CONFIG_LWIP_SNTP_MAX_SERVERS, (unsigned)interval_min);
+}
+
+static void time_sync_request_now(const char *reason)
+{
+    start_sntp_once();
+    if (!status_wifi_is_connected()) {
+        status_note_time_sync(s_sntp_started, system_time_is_valid(),
+                              system_time_is_valid() ? "Synced" : "Waiting for Wi-Fi");
+        return;
+    }
+    if (s_sntp_started) {
+        bool restarted = esp_sntp_restart();
+        status_note_time_sync(true, system_time_is_valid(), restarted ? "Syncing" : "Sync pending");
+        ESP_LOGI(TAG, "SNTP sync requested%s%s (restart=%d)",
+                 reason ? ": " : "", reason ? reason : "", restarted);
+    }
+}
+
+static void time_sync_schedule_worker(void *arg)
+{
+    (void)arg;
+    while (1) {
+        uint32_t delay_ms = time_sync_delay_ms_from_tuning();
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(delay_ms)) > 0) continue;
+        if (status_wifi_is_connected()) time_sync_request_now("scheduled");
+    }
+}
+
+static void time_sync_schedule_start(void)
+{
+    if (s_time_sync_sched_task) return;
+    BaseType_t ok = xTaskCreateWithCaps(time_sync_schedule_worker, "time_sched", TIME_SYNC_SCHED_TASK_STACK_BYTES,
+                                        NULL, 3, &s_time_sync_sched_task,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ok != pdPASS) ok = xTaskCreate(time_sync_schedule_worker, "time_sched", TIME_SYNC_SCHED_TASK_STACK_BYTES,
+                                       NULL, 3, &s_time_sync_sched_task);
+    if (ok != pdPASS) {
+        s_time_sync_sched_task = NULL;
+        ESP_LOGW(TAG, "Unable to start periodic time sync scheduler");
+    }
 }
 
 static void time_sync_worker(void *arg)
@@ -765,6 +864,7 @@ static void time_sync_worker(void *arg)
 static void time_sync_start_monitor(void)
 {
     start_sntp_once();
+    time_sync_schedule_start();
     if (system_time_is_valid()) {
         status_note_time_sync(true, true, "Synced");
         return;
@@ -780,6 +880,32 @@ static void time_sync_start_monitor(void)
         status_note_time_sync(s_sntp_started, false, "Monitor failed");
         ESP_LOGW(TAG, "Unable to start time sync monitor");
     }
+}
+
+esp_err_t services_time_sync_apply_tuning(void)
+{
+    uint16_t interval_min = time_sync_interval_min_from_tuning();
+    esp_sntp_set_sync_interval(time_sync_interval_ms_from_tuning());
+    if (s_time_sync_sched_task) xTaskNotifyGive(s_time_sync_sched_task);
+
+    if (!s_sntp_started) {
+        ESP_LOGI(TAG, "SNTP schedule set to every %u min at %02u:00; client has not started yet",
+                 (unsigned)interval_min, (unsigned)time_sync_hour_from_tuning());
+        return ESP_OK;
+    }
+
+    bool valid = system_time_is_valid();
+    if (!status_wifi_is_connected()) {
+        status_note_time_sync(true, valid, valid ? "Synced" : "Waiting for Wi-Fi");
+        ESP_LOGI(TAG, "SNTP schedule set to every %u min at %02u:00; waiting for Wi-Fi",
+                 (unsigned)interval_min, (unsigned)time_sync_hour_from_tuning());
+        return ESP_OK;
+    }
+
+    status_note_time_sync(true, valid, valid ? "Synced" : "Sync pending");
+    ESP_LOGI(TAG, "SNTP schedule set to every %u min at %02u:00",
+             (unsigned)interval_min, (unsigned)time_sync_hour_from_tuning());
+    return ESP_OK;
 }
 
 static bool wifi_disconnect_reason_is_credentials(uint8_t reason)
@@ -973,6 +1099,11 @@ static esp_err_t wifi_start_with_credentials(const char *ssid, const char *psk)
     return ESP_OK;
 }
 #else
+esp_err_t services_time_sync_apply_tuning(void)
+{
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
 static esp_err_t wifi_start_with_credentials(const char *ssid, const char *psk)
 {
     (void)ssid;
@@ -1395,7 +1526,13 @@ static void rs485_rx_worker(void *arg)
 {
     (void)arg;
     uint8_t buf[128];
-    char line[2048];
+    char *line = heap_caps_malloc(RS485_RX_LINE_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!line) line = heap_caps_malloc(RS485_RX_LINE_MAX, MALLOC_CAP_8BIT);
+    if (!line) {
+        status_note_rs485_overflow();
+        vTaskDelete(NULL);
+        return;
+    }
     size_t pos = 0;
 
     while (1) {
@@ -1409,7 +1546,7 @@ static void rs485_rx_worker(void *arg)
                     handle_rs485_line(line);
                     pos = 0;
                 }
-            } else if (pos < sizeof(line) - 1) {
+            } else if (pos < RS485_RX_LINE_MAX - 1) {
                 line[pos++] = ch;
             } else {
                 pos = 0;
@@ -1438,7 +1575,7 @@ esp_err_t cmd_tx_init(void)
     ESP_RETURN_ON_ERROR(uart_set_pin(BSP_RS485_UART_NUM, BSP_RS485_TX, BSP_RS485_RX,
                                      UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE),
                         TAG, "uart pin config failed");
-    ESP_RETURN_ON_ERROR(uart_driver_install(BSP_RS485_UART_NUM, 2048, 2048, 0, NULL, 0),
+    ESP_RETURN_ON_ERROR(uart_driver_install(BSP_RS485_UART_NUM, RS485_UART_BUF_SIZE, RS485_UART_BUF_SIZE, 0, NULL, 0),
                         TAG, "uart driver install failed");
 
     s_cmd_q = xQueueCreate(CMD_QUEUE_LEN, sizeof(cmd_msg_t));

@@ -39,6 +39,7 @@ extern "C" {
 #define THEME_FONT_LARGE      (&lv_font_montserrat_28)
 #define THEME_FONT_DISPLAY    (&lv_font_montserrat_26)
 #define THEME_FONT_TITLE      (&lv_font_montserrat_24)
+#define THEME_FONT_BODY_LARGE (&lv_font_montserrat_20)
 #define THEME_FONT_BODY       (&lv_font_montserrat_18)
 #define THEME_FONT_LABEL      (&lv_font_montserrat_16)
 #define THEME_FONT_SMALL      (&lv_font_montserrat_14)

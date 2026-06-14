@@ -100,9 +100,11 @@ static bool s_picker_syncing = false;
 #define TIMER_TOP_ROW_H 248
 #define TIMER_IDLE_TOP_ROW_H 304
 #define TIMER_OUTLINE_W 20
-#define TIMER_TIME_PANEL_RADIUS 22
+#define TIMER_TIME_PANEL_RADIUS 28
 #define TIMER_TIME_INNER_PAD TIMER_OUTLINE_W
-#define TIMER_TIME_INNER_RADIUS 4
+#define TIMER_TIME_INNER_RADIUS 14
+#define TIMER_OUTLINE_CORNER_SIZE (TIMER_TIME_PANEL_RADIUS * 2)
+#define TIMER_CORNER_GAUGE_MAX 1000
 #define TIMER_PICKER_PANEL_W 460
 #define TIMER_PICKER_PANEL_H 292
 #define TIMER_HISTORY_PANEL_W 208
@@ -190,11 +192,22 @@ static void timer_outline_segment_set(lv_obj_t *obj, lv_coord_t x, lv_coord_t y,
     lv_obj_set_size(obj, w, h);
 }
 
-static void timer_outline_corner_set(lv_obj_t *obj, bool visible)
+static void timer_outline_corner_value_set(lv_obj_t *obj, uint32_t value)
 {
     if (!obj) return;
-    if (visible) lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    if (value > TIMER_CORNER_GAUGE_MAX) value = TIMER_CORNER_GAUGE_MAX;
+    lv_arc_set_value(obj, (int32_t)value);
+}
+
+static void timer_outline_corner_width_set(int32_t width)
+{
+    lv_obj_t *corners[] = {s_outline_corner_tl, s_outline_corner_tr, s_outline_corner_br, s_outline_corner_bl};
+    for (size_t i = 0; i < sizeof(corners) / sizeof(corners[0]); i++) {
+        if (!corners[i]) continue;
+        if (lv_obj_get_style_arc_width(corners[i], LV_PART_INDICATOR) != width) {
+            lv_obj_set_style_arc_width(corners[i], width, LV_PART_INDICATOR);
+        }
+    }
 }
 
 static void timer_outline_set_color(lv_color_t color, lv_opa_t opa)
@@ -209,8 +222,8 @@ static void timer_outline_set_color(lv_color_t color, lv_opa_t opa)
     lv_obj_t *corners[] = {s_outline_corner_tl, s_outline_corner_tr, s_outline_corner_br, s_outline_corner_bl};
     for (size_t i = 0; i < sizeof(corners) / sizeof(corners[0]); i++) {
         if (!corners[i]) continue;
-        lv_obj_set_style_bg_color(corners[i], color, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(corners[i], opa, LV_PART_MAIN);
+        lv_obj_set_style_arc_color(corners[i], color, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_opa(corners[i], opa, LV_PART_INDICATOR);
     }
 }
 
@@ -223,6 +236,14 @@ static uint32_t timer_outline_piece(uint32_t elapsed, uint32_t start, uint32_t l
     uint32_t used = elapsed - start;
     if (offset) *offset = used;
     return length - used;
+}
+
+static uint32_t timer_outline_corner_gauge_value(uint32_t elapsed, uint32_t start, uint32_t length)
+{
+    if (length == 0 || elapsed >= start + length) return 0;
+    if (elapsed <= start) return TIMER_CORNER_GAUGE_MAX;
+    uint32_t remaining = length - (elapsed - start);
+    return (uint32_t)(((uint64_t)TIMER_CORNER_GAUGE_MAX * remaining + length - 1u) / length);
 }
 
 static uint32_t timer_remaining_ms(void)
@@ -246,22 +267,23 @@ static void timer_outline_set_progress_ms(uint32_t remaining_ms, uint32_t total_
     const uint32_t panel_w = TIMER_TIME_PANEL_W;
     const uint32_t panel_h = TIMER_TIME_PANEL_H;
     const uint32_t outline_w = TIMER_OUTLINE_W;
-    const uint32_t corner_half = outline_w / 2u;
-    const uint32_t top_len = panel_w - (outline_w * 2u);
-    const uint32_t right_len = panel_h - (outline_w * 2u);
+    const uint32_t corner_radius = TIMER_TIME_PANEL_RADIUS;
+    const uint32_t corner_len = corner_radius;
+    const uint32_t top_len = panel_w - (corner_radius * 2u);
+    const uint32_t right_len = panel_h - (corner_radius * 2u);
     const uint32_t bottom_len = top_len;
     const uint32_t left_len = right_len;
 
     const uint32_t tl_start = 0;
-    const uint32_t top_start = tl_start + corner_half;
+    const uint32_t top_start = tl_start + corner_len;
     const uint32_t tr_start = top_start + top_len;
-    const uint32_t right_start = tr_start + outline_w;
+    const uint32_t right_start = tr_start + corner_len;
     const uint32_t br_start = right_start + right_len;
-    const uint32_t bottom_start = br_start + outline_w;
+    const uint32_t bottom_start = br_start + corner_len;
     const uint32_t bl_start = bottom_start + bottom_len;
-    const uint32_t left_start = bl_start + outline_w;
+    const uint32_t left_start = bl_start + corner_len;
     const uint32_t tl_end_start = left_start + left_len;
-    const uint32_t perimeter = tl_end_start + corner_half;
+    const uint32_t perimeter = tl_end_start + corner_len;
 
     uint32_t lit = 0;
     if (total_ms > 0 && remaining_ms > 0) {
@@ -276,23 +298,31 @@ static void timer_outline_set_progress_ms(uint32_t remaining_ms, uint32_t total_
     uint32_t right = timer_outline_piece(elapsed, right_start, right_len, &right_offset);
     uint32_t bottom = timer_outline_piece(elapsed, bottom_start, bottom_len, NULL);
     uint32_t left = timer_outline_piece(elapsed, left_start, left_len, NULL);
+    uint32_t tl = 0;
+    if (elapsed < top_start) {
+        tl = timer_outline_corner_gauge_value(elapsed, tl_start, corner_len);
+    } else if (elapsed >= left_start) {
+        tl = timer_outline_corner_gauge_value(elapsed, tl_end_start, corner_len);
+    }
+    uint32_t tr = timer_outline_corner_gauge_value(elapsed, tr_start, corner_len);
+    uint32_t br = timer_outline_corner_gauge_value(elapsed, br_start, corner_len);
+    uint32_t bl = timer_outline_corner_gauge_value(elapsed, bl_start, corner_len);
 
-    timer_outline_segment_set(s_outline_top, (lv_coord_t)(outline_w + top_offset), 0,
+    timer_outline_segment_set(s_outline_top, (lv_coord_t)(corner_radius + top_offset), 0,
                               (lv_coord_t)top, (lv_coord_t)outline_w);
     timer_outline_segment_set(s_outline_right, (lv_coord_t)(panel_w - outline_w),
-                              (lv_coord_t)(outline_w + right_offset),
+                              (lv_coord_t)(corner_radius + right_offset),
                               (lv_coord_t)outline_w, (lv_coord_t)right);
-    timer_outline_segment_set(s_outline_bottom, (lv_coord_t)outline_w,
+    timer_outline_segment_set(s_outline_bottom, (lv_coord_t)corner_radius,
                               (lv_coord_t)(panel_h - outline_w),
                               (lv_coord_t)bottom, (lv_coord_t)outline_w);
-    timer_outline_segment_set(s_outline_left, 0, (lv_coord_t)outline_w,
+    timer_outline_segment_set(s_outline_left, 0, (lv_coord_t)corner_radius,
                               (lv_coord_t)outline_w, (lv_coord_t)left);
 
-    bool has_lit = lit > 0;
-    timer_outline_corner_set(s_outline_corner_tl, has_lit && (elapsed < top_start || elapsed >= left_start));
-    timer_outline_corner_set(s_outline_corner_tr, has_lit && elapsed < right_start);
-    timer_outline_corner_set(s_outline_corner_br, has_lit && elapsed < bottom_start);
-    timer_outline_corner_set(s_outline_corner_bl, has_lit && elapsed < left_start);
+    timer_outline_corner_value_set(s_outline_corner_tl, lit > 0 ? tl : 0);
+    timer_outline_corner_value_set(s_outline_corner_tr, lit > 0 ? tr : 0);
+    timer_outline_corner_value_set(s_outline_corner_br, lit > 0 ? br : 0);
+    timer_outline_corner_value_set(s_outline_corner_bl, lit > 0 ? bl : 0);
 }
 
 static void timer_outline_refresh(void)
@@ -349,6 +379,7 @@ static lv_obj_t *timer_outline_segment_create(lv_obj_t *parent)
     lv_obj_set_style_bg_color(segment, THEME_PRIMARY_COLOR, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(segment, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_radius(segment, 0, LV_PART_MAIN);
+    lv_obj_set_style_clip_corner(segment, true, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(segment, 0, LV_PART_MAIN);
     lv_obj_set_style_shadow_color(segment, THEME_PRIMARY_COLOR, LV_PART_MAIN);
     lv_obj_set_style_shadow_opa(segment, LV_OPA_TRANSP, LV_PART_MAIN);
@@ -356,12 +387,30 @@ static lv_obj_t *timer_outline_segment_create(lv_obj_t *parent)
     return segment;
 }
 
-static lv_obj_t *timer_outline_corner_create(lv_obj_t *parent, lv_coord_t x, lv_coord_t y)
+static lv_obj_t *timer_outline_corner_create(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
+                                             uint16_t start_angle, uint16_t end_angle)
 {
-    lv_obj_t *corner = timer_outline_segment_create(parent);
+    lv_obj_t *corner = lv_arc_create(parent);
     lv_obj_set_pos(corner, x, y);
-    lv_obj_set_size(corner, TIMER_OUTLINE_W, TIMER_OUTLINE_W);
-    lv_obj_add_flag(corner, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_size(corner, TIMER_OUTLINE_CORNER_SIZE, TIMER_OUTLINE_CORNER_SIZE);
+    lv_arc_set_bg_angles(corner, start_angle, end_angle);
+    lv_arc_set_range(corner, 0, 1000);
+    lv_arc_set_mode(corner, LV_ARC_MODE_REVERSE);
+    lv_arc_set_value(corner, 0);
+    lv_obj_set_style_bg_opa(corner, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(corner, 0, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(corner, TIMER_OUTLINE_W, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(corner, lv_color_hex(0x26314D), LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(corner, LV_OPA_70, LV_PART_MAIN);
+    lv_obj_set_style_arc_rounded(corner, false, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(corner, TIMER_OUTLINE_W, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(corner, THEME_PRIMARY_COLOR, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_opa(corner, LV_OPA_TRANSP, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(corner, true, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(corner, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_set_style_border_width(corner, 0, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(corner, 0, LV_PART_KNOB);
+    lv_obj_clear_flag(corner, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     return corner;
 }
 
@@ -872,12 +921,14 @@ static void anim_timer_cb(lv_timer_t *timer)
 
         /* Dynamically morph shadow thickness and color light intensity */
         int32_t arc_shadow = 14 + (int32_t)(26.0f * sin_val); /* Breathe between 14px and 40px */
+        int32_t corner_width = TIMER_OUTLINE_W - 2 + (int32_t)(4.0f * sin_val);
         int32_t btn_shadow = 8 + (int32_t)(20.0f * sin_val);  /* Start button pulse */
         lv_opa_t arc_opa = (lv_opa_t)(LV_OPA_20 + (int32_t)(35.0f * sin_val));
         lv_opa_t btn_opa = (lv_opa_t)(LV_OPA_20 + (int32_t)(30.0f * sin_val));
 
         if (s_time_panel) {
             timer_shadow_set_if_changed(s_time_panel, arc_shadow, THEME_PRIMARY_COLOR, arc_opa);
+            timer_outline_corner_width_set(corner_width);
             timer_outline_set_color(THEME_PRIMARY_COLOR, LV_OPA_COVER);
         }
 
@@ -891,11 +942,13 @@ static void anim_timer_cb(lv_timer_t *timer)
 
         int32_t alarm_shadow = 20 + (int32_t)(35.0f * sin_val);
         int32_t button_shadow = 16 + (int32_t)(30.0f * sin_val);
+        int32_t corner_width = TIMER_OUTLINE_W + (int32_t)(5.0f * sin_val);
         int32_t scale = 256 + (int32_t)(18.0f * sin_val);
         lv_opa_t alarm_opa = (lv_opa_t)(LV_OPA_40 + (int32_t)(45.0f * sin_val));
 
         if (s_time_panel) {
             timer_shadow_set_if_changed(s_time_panel, alarm_shadow, THEME_ACCENT_COLOR, alarm_opa);
+            timer_outline_corner_width_set(corner_width);
         }
         if (s_repeat_btn) {
             timer_scale_set_if_changed(s_repeat_btn, scale);
@@ -915,6 +968,7 @@ static void anim_timer_cb(lv_timer_t *timer)
 
         if (s_time_panel) {
             timer_shadow_set_if_changed(s_time_panel, rest_arc_shadow, theme_border_color(), LV_OPA_10);
+            timer_outline_corner_width_set(TIMER_OUTLINE_W);
         }
 
         if (s_start_btn) {
@@ -1769,8 +1823,8 @@ lv_obj_t *screen_timer_create(lv_obj_t *parent)
     lv_obj_remove_style_all(s_time_panel);
     theme_style_glass_panel(s_time_panel, 8);
     lv_obj_set_size(s_time_panel, TIMER_TIME_PANEL_W, TIMER_TIME_PANEL_H);
-    lv_obj_set_style_bg_color(s_time_panel, lv_color_hex(0x0C1021), LV_PART_MAIN);
-    lv_obj_set_style_border_color(s_time_panel, lv_color_hex(0x222B44), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_time_panel, lv_color_hex(0x151B2E), LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_time_panel, lv_color_hex(0x303A59), LV_PART_MAIN);
     lv_obj_set_style_border_width(s_time_panel, 2, LV_PART_MAIN);
     lv_obj_set_style_radius(s_time_panel, TIMER_TIME_PANEL_RADIUS, LV_PART_MAIN);
     lv_obj_set_style_clip_corner(s_time_panel, true, LV_PART_MAIN);
@@ -1784,14 +1838,17 @@ lv_obj_t *screen_timer_create(lv_obj_t *parent)
     s_outline_right = timer_outline_segment_create(s_time_panel);
     s_outline_bottom = timer_outline_segment_create(s_time_panel);
     s_outline_left = timer_outline_segment_create(s_time_panel);
-    s_outline_corner_tl = timer_outline_corner_create(s_time_panel, 0, 0);
+    s_outline_corner_tl = timer_outline_corner_create(s_time_panel, 0, 0, 180, 270);
     s_outline_corner_tr = timer_outline_corner_create(s_time_panel,
-                                                       TIMER_TIME_PANEL_W - TIMER_OUTLINE_W, 0);
+                                                       TIMER_TIME_PANEL_W - TIMER_OUTLINE_CORNER_SIZE, 0,
+                                                       270, 360);
     s_outline_corner_br = timer_outline_corner_create(s_time_panel,
-                                                       TIMER_TIME_PANEL_W - TIMER_OUTLINE_W,
-                                                       TIMER_TIME_PANEL_H - TIMER_OUTLINE_W);
+                                                       TIMER_TIME_PANEL_W - TIMER_OUTLINE_CORNER_SIZE,
+                                                       TIMER_TIME_PANEL_H - TIMER_OUTLINE_CORNER_SIZE,
+                                                       0, 90);
     s_outline_corner_bl = timer_outline_corner_create(s_time_panel, 0,
-                                                       TIMER_TIME_PANEL_H - TIMER_OUTLINE_W);
+                                                       TIMER_TIME_PANEL_H - TIMER_OUTLINE_CORNER_SIZE,
+                                                       90, 180);
 
     s_time_inner_panel = lv_obj_create(s_time_panel);
     lv_obj_remove_style_all(s_time_inner_panel);
@@ -1802,6 +1859,9 @@ lv_obj_t *screen_timer_create(lv_obj_t *parent)
     lv_obj_set_style_bg_color(s_time_inner_panel, lv_color_hex(0x0C1021), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_time_inner_panel, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(s_time_inner_panel, TIMER_TIME_INNER_RADIUS, LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_time_inner_panel, lv_color_hex(0x1E2740), LV_PART_MAIN);
+    lv_obj_set_style_border_opa(s_time_inner_panel, LV_OPA_60, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_time_inner_panel, 1, LV_PART_MAIN);
     lv_obj_set_style_clip_corner(s_time_inner_panel, true, LV_PART_MAIN);
     lv_obj_clear_flag(s_time_inner_panel, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 

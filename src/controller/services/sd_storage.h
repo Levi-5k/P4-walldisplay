@@ -9,11 +9,20 @@
 extern "C" {
 #endif
 
+typedef struct {
+	bool mounted;
+	bool paused;
+	bool network_busy;
+	esp_err_t last_err;
+	char last_error[96];
+} sd_storage_status_t;
+
 esp_err_t sd_storage_ensure_mounted(void);
 esp_err_t sd_storage_ensure_dir(const char *path);
 esp_err_t sd_storage_write_text_atomic(const char *path, const char *data, size_t len);
 bool sd_storage_file_exists(const char *path);
 const char *sd_storage_last_error(void);
+void sd_storage_status_get(sd_storage_status_t *out);
 
 /**
  * Prevent app-level SD access until sd_storage_resume() is called.

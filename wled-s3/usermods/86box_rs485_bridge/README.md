@@ -4,12 +4,14 @@ This usermod is the first pass at the ESP32-S3 side of the P4 wall display link.
 
 It reads newline-delimited JSON from RS-485 and forwards it into WLED's existing JSON APIs:
 
-- `{"v":true}` sends a `state` + `info` snapshot back to the P4.
+- `{"v":true}` sends a compact `state` + `info` snapshot plus a root `presets` list back to the P4.
 - State JSON such as `{"on":true,"bri":128,"seg":[...]}` is applied with WLED's state deserializer.
-- Preset/reboot JSON such as `{"ps":1}` and `{"rb":true}` is also applied with WLED's state deserializer.
+- Preset, playlist, and reboot JSON such as `{"ps":1}`, `{"psave":1,"n":"Evening"}`, `{"pdel":1}`, `{"np":true}`, `{"playlist":{...}}`, and `{"rb":true}` is also applied with WLED's state deserializer.
 - Config JSON such as `{"nw":...,"id":...,"if":...}` is applied with WLED's config deserializer when available.
 
-The P4 poll stream is treated as the link heartbeat. Once the bridge sees valid P4 JSON, it becomes request/response only and stops sending unsolicited periodic snapshots, which avoids half-duplex collisions with the P4's regular `{"v":true}` polls. If the P4 goes stale, the bridge falls back to quiet-bus reconnect announcements every 15 seconds. The bridge also drops stale partial lines, holds oversized lines until newline before reporting one error, and adds a small DE settle/hold delay around each transmit.
+The P4 poll stream is treated as the link heartbeat. Once the bridge sees valid P4 JSON, it becomes request/response only and stops sending unsolicited periodic snapshots, which avoids half-duplex collisions with the P4's regular `{"v":true}` polls. If the P4 goes stale, the bridge falls back to quiet-bus reconnect announcements every 15 seconds. If the bridge boots but never sees an initial P4 frame, it periodically restarts the RS-485 UART/DE hardware instead of waiting forever for a USB-serial monitor reset. The bridge also drops stale partial lines, holds oversized lines until newline before reporting one error, and adds a small DE settle/hold delay around each transmit.
+
+Preset readback uses WLED's saved preset names and returns compact `[id,name]` entries. Deleted presets are omitted, so the P4 Presets tab only shows panels for presets that actually exist in WLED.
 
 See [P4_PARAMETER_CONTRACT.md](../../P4_PARAMETER_CONTRACT.md) for the complete P4-controlled parameter list.
 

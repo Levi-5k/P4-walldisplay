@@ -46,6 +46,14 @@
 #define USERMOD_86BOX_RS485_TX_HOLD_US 200U
 #endif
 
+#ifndef USERMOD_86BOX_RS485_PRESET_MAX
+#define USERMOD_86BOX_RS485_PRESET_MAX 250U
+#endif
+
+#ifndef USERMOD_86BOX_RS485_PRESET_NAME_MAX
+#define USERMOD_86BOX_RS485_PRESET_NAME_MAX 24U
+#endif
+
 #ifndef USERMOD_86BOX_PSU_RELAY_PIN
 #define USERMOD_86BOX_PSU_RELAY_PIN 47
 #endif
@@ -94,6 +102,14 @@
 #define USERMOD_86BOX_RS485_SELF_HEAL_ERROR_RESET_COUNT 6U
 #endif
 
+#ifndef USERMOD_86BOX_RS485_SELF_HEAL_NO_LINK_RESET_MS
+#define USERMOD_86BOX_RS485_SELF_HEAL_NO_LINK_RESET_MS 45000UL
+#endif
+
+#ifndef USERMOD_86BOX_RS485_SELF_HEAL_NO_LINK_REBOOT_MS
+#define USERMOD_86BOX_RS485_SELF_HEAL_NO_LINK_REBOOT_MS 600000UL
+#endif
+
 class Usermod86BoxRs485Bridge : public Usermod {
 private:
   enum Rs485SelfHealState : uint8_t {
@@ -115,6 +131,12 @@ private:
   uint32_t rxLineCount = 0;
   uint32_t rxErrorCount = 0;
   uint32_t txSnapshotCount = 0;
+  bool presetCacheLoaded = false;
+  uint32_t presetCacheModifiedTime = 0;
+  uint16_t presetCacheCount = 0;
+  bool presetCacheTruncated = false;
+  uint16_t presetCacheIds[USERMOD_86BOX_RS485_PRESET_MAX];
+  char presetCacheNames[USERMOD_86BOX_RS485_PRESET_MAX][USERMOD_86BOX_RS485_PRESET_NAME_MAX + 1];
 
   int8_t psuRelayPin = USERMOD_86BOX_PSU_RELAY_PIN;
   bool psuRelayEnabled = USERMOD_86BOX_PSU_RELAY_ENABLED;
@@ -130,6 +152,8 @@ private:
   unsigned long psuRelayOnSinceMs = 0;
   unsigned long psuRelayOffRequestedMs = 0;
   unsigned long lastSelfHealMs = 0;
+  unsigned long rs485FirstStartedMs = 0;
+  unsigned long rs485StartedMs = 0;
   unsigned long lastRs485ResetMs = 0;
   uint32_t lastRs485ResetErrorCount = 0;
   uint32_t rs485ResetCount = 0;
@@ -162,6 +186,24 @@ private:
     selfHealState = RS485_SELF_HEAL_OK;
   }
 
+  void beginRs485Serial()
+  {
+#ifdef USERMOD_86BOX_RS485_DE
+    pinMode(USERMOD_86BOX_RS485_DE, OUTPUT);
+    setTransmitMode(false);
+#endif
+    bridgeSerial.begin(USERMOD_86BOX_RS485_BAUD, SERIAL_8N1,
+                       USERMOD_86BOX_RS485_RX, USERMOD_86BOX_RS485_TX);
+#ifdef USERMOD_86BOX_RS485_DE
+    setTransmitMode(false);
+#endif
+    while (bridgeSerial.available() > 0) (void)bridgeSerial.read();
+
+    unsigned long now = millis();
+    if (rs485FirstStartedMs == 0) rs485FirstStartedMs = now;
+    rs485StartedMs = now;
+  }
+
   void serviceRs485LinkState()
   {
     if (lineBuffer.length() > 0 && lastRxByteMs != 0 && elapsed(lastRxByteMs, USERMOD_86BOX_RS485_RX_IDLE_RESET_MS)) {
@@ -188,16 +230,18 @@ private:
   {
 #if USERMOD_86BOX_RS485_SELF_HEAL_ENABLED
     if (!serialReady) return;
+    serialReady = false;
     bridgeSerial.flush();
     bridgeSerial.end();
-    delay(5);
+    delay(20);
 #ifdef USERMOD_86BOX_RS485_DE
+    pinMode(USERMOD_86BOX_RS485_DE, OUTPUT);
     setTransmitMode(false);
 #endif
     lineBuffer = "";
     lineOverflow = false;
-    bridgeSerial.begin(USERMOD_86BOX_RS485_BAUD, SERIAL_8N1,
-                       USERMOD_86BOX_RS485_RX, USERMOD_86BOX_RS485_TX);
+    beginRs485Serial();
+    serialReady = true;
     lastStatusMs = 0;
     lastRxByteMs = 0;
     lastRs485ResetMs = millis();
@@ -254,6 +298,7 @@ private:
   void serviceSelfHeal()
   {
 #if USERMOD_86BOX_RS485_SELF_HEAL_ENABLED
+    if (!serialReady) return;
     unsigned long now = millis();
     if (lastSelfHealMs != 0 && now - lastSelfHealMs < USERMOD_86BOX_RS485_SELF_HEAL_CHECK_MS) return;
     lastSelfHealMs = now;
@@ -263,12 +308,27 @@ private:
       return;
     }
 
-    if (!p4LinkSeen || lastValidRxMs == 0 || p4LinkOnline) return;
+    if (!p4LinkSeen || lastValidRxMs == 0) {
+      if (USERMOD_86BOX_RS485_SELF_HEAL_REBOOT_AFTER_RESETS > 0 &&
+          rs485ConsecutiveResetCount >= USERMOD_86BOX_RS485_SELF_HEAL_REBOOT_AFTER_RESETS &&
+          rs485FirstStartedMs != 0 &&
+          elapsed(rs485FirstStartedMs, USERMOD_86BOX_RS485_SELF_HEAL_NO_LINK_REBOOT_MS)) {
+        requestSelfHealReboot();
+        return;
+      }
+
+      if (rs485StartedMs != 0 && elapsed(rs485StartedMs, USERMOD_86BOX_RS485_SELF_HEAL_NO_LINK_RESET_MS)) {
+        restartRs485Bridge(true);
+      }
+      return;
+    }
+
+    if (p4LinkOnline) return;
 
     unsigned long staleMs = now - lastValidRxMs;
     if (staleMs >= USERMOD_86BOX_RS485_SELF_HEAL_STALE_RESET_MS &&
         (lastRs485ResetMs == 0 || now - lastRs485ResetMs >= USERMOD_86BOX_RS485_SELF_HEAL_STALE_RESET_MS)) {
-      restartRs485Bridge(false);
+      restartRs485Bridge(true);
     }
 
     if (USERMOD_86BOX_RS485_SELF_HEAL_REBOOT_AFTER_RESETS > 0 &&
@@ -295,6 +355,8 @@ private:
   bool incomingStateMayNeedPsuPower(JsonObject root) const
   {
     if (!root[F("ps")].isNull()) return true;
+    if (!root[F("np")].isNull()) return true;
+    if (!root[F("playlist")].isNull()) return true;
 
     JsonVariant onValue = root[F("on")];
     JsonVariant briValue = root[F("bri")];
@@ -417,6 +479,10 @@ private:
            root.containsKey(F("bri")) ||
            root.containsKey(F("transition")) ||
           root.containsKey(F("ps")) ||
+          root.containsKey(F("psave")) ||
+          root.containsKey(F("pdel")) ||
+          root.containsKey(F("np")) ||
+          root.containsKey(F("playlist")) ||
           root.containsKey(F("rb")) ||
            root.containsKey(F("seg"));
   }
@@ -439,6 +505,14 @@ private:
     JsonObject station = interfaces[0].as<JsonObject>();
     return !station.isNull() &&
            (station.containsKey(F("ssid")) || station.containsKey(F("psk")));
+  }
+
+  void invalidatePresetCache()
+  {
+    presetCacheLoaded = false;
+    presetCacheModifiedTime = 0;
+    presetCacheCount = 0;
+    presetCacheTruncated = false;
   }
 
   void setTransmitMode(bool transmitting)
@@ -474,6 +548,34 @@ private:
   {
     JsonVariant value = source[key];
     if (!value.isNull()) target[key] = value;
+  }
+
+  void refreshPresetCache()
+  {
+    if (presetCacheLoaded && presetCacheModifiedTime == presetsModifiedTime) return;
+
+    presetCacheCount = 0;
+    presetCacheTruncated = false;
+    for (uint16_t id = 1; id <= 250; id++) {
+      String name;
+      if (!getPresetName((byte)id, name)) continue;
+      name.trim();
+      if (!name.length()) {
+        name = F("Preset ");
+        name += id;
+      }
+
+      if (presetCacheCount >= USERMOD_86BOX_RS485_PRESET_MAX) {
+        presetCacheTruncated = true;
+        break;
+      }
+
+      presetCacheIds[presetCacheCount] = id;
+      strlcpy(presetCacheNames[presetCacheCount], name.c_str(), sizeof(presetCacheNames[presetCacheCount]));
+      presetCacheCount++;
+    }
+    presetCacheModifiedTime = presetsModifiedTime;
+    presetCacheLoaded = true;
   }
 
   static void copyFirstSegment(JsonObject targetState, JsonObject sourceState)
@@ -517,6 +619,8 @@ private:
     copyJsonValue(targetState, sourceState, "on");
     copyJsonValue(targetState, sourceState, "bri");
     copyJsonValue(targetState, sourceState, "transition");
+    copyJsonValue(targetState, sourceState, "ps");
+    copyJsonValue(targetState, sourceState, "pl");
     copyFirstSegment(targetState, sourceState);
 
     JsonObject targetInfo = target.createNestedObject(F("info"));
@@ -543,6 +647,15 @@ private:
     targetBridge[F("err")] = rxErrorCount;
     targetBridge[F("tx")] = txSnapshotCount;
     targetBridge[F("ageMs")] = lastValidRxMs ? (uint32_t)(millis() - lastValidRxMs) : 0;
+
+    refreshPresetCache();
+    JsonArray targetPresets = target.createNestedArray(F("presets"));
+    for (uint16_t i = 0; i < presetCacheCount; i++) {
+      JsonArray entry = targetPresets.createNestedArray();
+      entry.add(presetCacheIds[i]);
+      entry.add(presetCacheNames[i]);
+    }
+    if (presetCacheTruncated) target[F("ptrunc")] = true;
   }
 
   void sendStateSnapshot()
@@ -553,7 +666,7 @@ private:
     serializeState(fullState);
     serializeInfo(fullInfo);
 
-    StaticJsonDocument<1280> compact;
+    DynamicJsonDocument compact(32768);
     buildCompactSnapshot(compact, fullState, fullInfo);
     txSnapshotCount++;
     writeJsonDocument(compact);
@@ -614,6 +727,7 @@ private:
     }
     if (hasStateKeys(root)) {
       applyState(root);
+      if (root.containsKey(F("psave")) || root.containsKey(F("pdel"))) invalidatePresetCache();
       changed = true;
     }
 
@@ -659,14 +773,8 @@ public:
   {
     if (!configureRs485Pins()) return;
 
-#ifdef USERMOD_86BOX_RS485_DE
-    pinMode(USERMOD_86BOX_RS485_DE, OUTPUT);
-    setTransmitMode(false);
-#endif
-
     lineBuffer.reserve(USERMOD_86BOX_RS485_LINE_MAX);
-    bridgeSerial.begin(USERMOD_86BOX_RS485_BAUD, SERIAL_8N1,
-                       USERMOD_86BOX_RS485_RX, USERMOD_86BOX_RS485_TX);
+    beginRs485Serial();
     serialReady = true;
     configurePsuRelay();
     initDone = true;

@@ -3,6 +3,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define WLED_PRESET_LIST_MAX 250
+#define WLED_PRESET_NAME_MAX 25
+
+typedef struct {
+    uint16_t id;
+    char     name[WLED_PRESET_NAME_MAX];
+} wled_preset_item_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -11,6 +19,11 @@ typedef struct {
     bool     on;
     uint8_t  bri;
     uint8_t  transition;
+    int16_t  ps;
+    int16_t  pl;
+    uint16_t preset_count;
+    bool     presets_truncated;
+    const wled_preset_item_t *presets;
 
     /* Segment 0 state */
     uint8_t  seg0_fx;

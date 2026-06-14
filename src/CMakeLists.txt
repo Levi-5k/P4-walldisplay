@@ -30,6 +30,7 @@ idf_component_register(
         "controller/services/services.c"
         "controller/services/app_config.c"
         "controller/services/sd_storage.c"
+        "controller/services/sd_error_log.c"
         "controller/services/serial_debug.c"
         "controller/services/led_state.c"
         "controller/services/audio_bus.c"
