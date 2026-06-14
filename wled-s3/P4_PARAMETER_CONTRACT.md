@@ -96,8 +96,8 @@ These JSON keys must be accepted by the S3 bridge and forwarded into WLED's conf
 | `id.mdns` | string; currently `wled-86box` | P4 provisioning worker | mDNS name the P4 audio sender resolves as `wled-86box.local`. |
 | `id.name` | string; currently `86Box LED` | P4 provisioning worker | Friendly WLED device name. |
 | `if.sync.recv` | boolean; currently `true` | P4 provisioning worker | Enables WLED sync receive. |
-| `if.sync.port` | UDP port; currently `11988` | P4 provisioning worker | WLED-MM sound sync receive port. |
-| `if.sync.group` | integer; currently `1` | P4 provisioning worker | WLED-MM sync group. |
+| `if.sync.port` | UDP port; currently `11988` | P4 provisioning worker | WLED-MM sound sync receive port; ignored by the non-audio WLED 16 branch. |
+| `if.sync.group` | integer; currently `1` | P4 provisioning worker | WLED-MM sync group; ignored by the non-audio WLED 16 branch. |
 
 Current provisioning payload shape:
 
@@ -107,7 +107,9 @@ Current provisioning payload shape:
 
 ## Audio Sync From P4
 
-Audio sync is UDP, not RS-485 JSON. The S3 firmware must use WLED-MM/MoonModules with `USERMOD_AUDIOREACTIVE` enabled.
+Audio sync is UDP, not RS-485 JSON. On the normal MoonModules branch, the S3 firmware must use WLED-MM/MoonModules with `USERMOD_AUDIOREACTIVE` enabled.
+
+The `wled-16-non-audio` branch intentionally targets official WLED `v16.0.0` without AudioReactive. RS-485 control, presets, and bridge diagnostics still apply, but P4 audio-sync packets are ignored by that firmware.
 
 | Parameter | Current value | Purpose |
 | --- | --- | --- |
@@ -176,10 +178,10 @@ These are not runtime settings the P4 changes over RS-485. The board-level items
 | Build flag/setting | Current sample | What to verify |
 | --- | --- | --- |
 | `board` | `waveshare_esp32s3_relay_1ch` | Local board file in `wled-s3/boards/`; keep in sync with upstream if MoonModules adds an official ID later. |
-| `extends` | `env:esp32S3_8MB_PSRAM_M_opi` | Parent provides ESP32-S3 WLED-MM build flags with OPI PSRAM support; override sets 16 MB flash. |
+| `extends` | `env:esp32s3dev_16MB_opi` | Official WLED 16 parent for ESP32-S3 with 16 MB flash and OPI PSRAM. |
 | `board_build.arduino.memory_type` | `qio_opi` via local board file | Matches external QIO flash plus OPI PSRAM assumption for ESP32-S3R8-class hardware. |
 | `board_upload.flash_size` / partitions | `16MB`, `${esp32.extreme_partitions}` | Confirm OTA/filesystem layout is acceptable before production flashing. |
-| `USERMOD_AUDIOREACTIVE` | enabled | Required for P4 WLED-MM audio sync. |
+| `custom_usermods` | `86box_rs485_bridge` | WLED 16 dynamic usermod loader; AudioReactive is intentionally omitted on this branch. |
 | `USERMOD_86BOX_RS485_UART` | `1` | S3 UART connected to RS-485 transceiver. |
 | `USERMOD_86BOX_RS485_TX` | `17` | S3 UART TX GPIO. |
 | `USERMOD_86BOX_RS485_RX` | `18` | S3 UART RX GPIO. |
@@ -187,7 +189,7 @@ These are not runtime settings the P4 changes over RS-485. The board-level items
 | `USERMOD_86BOX_RS485_BAUD` | `115200` | Must match P4 `BSP_RS485_BAUD`. |
 | `ARDUINO_USB_CDC_ON_BOOT` | `0` | Keep the S3 WLED app headless; enabling CDC-on-boot can make startup depend on opening a USB serial monitor. |
 | `LEDPIN` / `DATA_PINS` | `1` | First-boot LED output GPIO; WLED web field maps to `hw.led.ins[0].pin`. |
-| `DEFAULT_LED_COUNT` / `PIXEL_COUNTS` | `300` | First-boot LED count; WLED web field maps to `hw.led.ins[0].len`. |
+| `PIXEL_COUNTS` | `300` | First-boot LED count; WLED web field maps to `hw.led.ins[0].len`. |
 | `PIXEL_TYPE` | WLED default unless overridden | Set LED chipset/type on the WLED web page; config maps to `hw.led.ins[0].type`. |
 | Color order | WLED default unless overridden | Set color order on the WLED web page; config maps to `hw.led.ins[0].order`. |
 | `ABL_MILLIAMPS_DEFAULT` | `5000` | First-boot auto brightness limiter in mA; WLED web field maps to `hw.led.maxpwr`. |
@@ -198,7 +200,6 @@ These are not runtime settings the P4 changes over RS-485. The board-level items
 | `USERMOD_86BOX_PSU_RELAY_ON_LEAD_MS` | `750` | Delay before applying P4 LED-on JSON after energizing the PSU relay. |
 | `USERMOD_86BOX_PSU_RELAY_OFF_HOLD_MS` | `10000` | Time to keep the PSU energized after WLED output reaches off. |
 | `USERMOD_86BOX_PSU_RELAY_MIN_CYCLE_MS` | `1500` | Minimum interval between relay output transitions to avoid chatter. |
-| `SR_DMTYPE` | `254` | Network receive only for Audio Reactive; P4 supplies WLED-MM audio-sync UDP packets. |
 | I2S audio pins | `-1` | Disabled to avoid conflicts with relay GPIO47 and unused mic pins. |
 | `WLED_RELEASE_NAME` | `86Box-S3-Waveshare-Relay1CH` | Cosmetic build name shown by WLED. |
 

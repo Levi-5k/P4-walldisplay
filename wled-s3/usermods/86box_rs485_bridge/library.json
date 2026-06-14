@@ -1,0 +1,5 @@
+{
+  "name": "86box_rs485_bridge",
+  "build": { "libArchive": false },
+  "dependencies": {}
+}

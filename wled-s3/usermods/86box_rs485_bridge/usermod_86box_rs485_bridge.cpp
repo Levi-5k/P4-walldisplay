@@ -1,0 +1,4 @@
+#include "usermod_86box_rs485_bridge.h"
+
+Usermod86BoxRs485Bridge usermod_86box_rs485_bridge;
+REGISTER_USERMOD(usermod_86box_rs485_bridge);

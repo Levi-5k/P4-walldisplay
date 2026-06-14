@@ -44,15 +44,11 @@ chmod +x "$upstream_dir/esptool.py"
 cat <<'MSG'
 Overlay files copied.
 
-Manual upstream edit still needed in wled00/usermods_list.cpp:
-
-  #include "../usermods/86box_rs485_bridge/usermod_86box_rs485_bridge.h"
-
-Inside registerUsermods():
-
-  usermods.add(new Usermod86BoxRs485Bridge());
+This WLED 16 non-audio overlay uses custom_usermods and REGISTER_USERMOD, so no
+manual wled00/usermods_list.cpp edit is needed.
 
 Then build from the upstream checkout:
 
+  pio run -e S3_WLED_Host -t clean
   pio run -e S3_WLED_Host
 MSG

@@ -120,6 +120,8 @@ private:
 
   HardwareSerial bridgeSerial;
   String lineBuffer;
+  bool initDone = false;
+  bool enabled = true;
   unsigned long lastStatusMs = 0;
   unsigned long lastRxByteMs = 0;
   unsigned long lastValidRxMs = 0;
@@ -162,6 +164,15 @@ private:
   Rs485SelfHealState selfHealState = RS485_SELF_HEAL_OK;
   bool selfHealRebootPending = false;
   bool rs485PinsReady = false;
+
+  static const char _name[];
+  static const char _enabled[];
+  static const char _psuRelayEnabled[];
+  static const char _psuRelayPin[];
+  static const char _psuRelayActiveHigh[];
+  static const char _psuRelayOnLeadMs[];
+  static const char _psuRelayOffHoldMs[];
+  static const char _psuRelayMinCycleMs[];
 
   static bool elapsed(unsigned long since, unsigned long interval)
   {
@@ -249,17 +260,17 @@ private:
     if (countConsecutiveReset && rs485ConsecutiveResetCount < UINT8_MAX) rs485ConsecutiveResetCount++;
     lastRs485ResetErrorCount = rxErrorCount;
     selfHealState = RS485_SELF_HEAL_UART_RESET;
-    USER_PRINTLN(F("86Box RS485 bridge self-heal: UART restarted"));
+    DEBUG_PRINTLN(F("86Box RS485 bridge self-heal: UART restarted"));
 #endif
   }
 
   void releaseRs485Pins()
   {
     if (!rs485PinsReady) return;
-    pinManager.deallocatePin(USERMOD_86BOX_RS485_TX, PinOwner::UM_Unspecified);
-    pinManager.deallocatePin(USERMOD_86BOX_RS485_RX, PinOwner::UM_Unspecified);
+    PinManager::deallocatePin(USERMOD_86BOX_RS485_TX, PinOwner::UM_Unspecified);
+    PinManager::deallocatePin(USERMOD_86BOX_RS485_RX, PinOwner::UM_Unspecified);
 #ifdef USERMOD_86BOX_RS485_DE
-    pinManager.deallocatePin(USERMOD_86BOX_RS485_DE, PinOwner::UM_Unspecified);
+    PinManager::deallocatePin(USERMOD_86BOX_RS485_DE, PinOwner::UM_Unspecified);
 #endif
     rs485PinsReady = false;
   }
@@ -267,14 +278,14 @@ private:
   bool configureRs485Pins()
   {
     releaseRs485Pins();
-    bool ok = pinManager.allocatePin(USERMOD_86BOX_RS485_TX, true, PinOwner::UM_Unspecified) &&
-              pinManager.allocatePin(USERMOD_86BOX_RS485_RX, false, PinOwner::UM_Unspecified);
+    bool ok = PinManager::allocatePin(USERMOD_86BOX_RS485_TX, true, PinOwner::UM_Unspecified) &&
+              PinManager::allocatePin(USERMOD_86BOX_RS485_RX, false, PinOwner::UM_Unspecified);
 #ifdef USERMOD_86BOX_RS485_DE
-    ok = ok && pinManager.allocatePin(USERMOD_86BOX_RS485_DE, true, PinOwner::UM_Unspecified);
+    ok = ok && PinManager::allocatePin(USERMOD_86BOX_RS485_DE, true, PinOwner::UM_Unspecified);
 #endif
     if (!ok) {
       releaseRs485Pins();
-      USER_PRINTLN(F("86Box RS485 bridge: pin allocation failed"));
+      DEBUG_PRINTLN(F("86Box RS485 bridge: pin allocation failed"));
       return false;
     }
     rs485PinsReady = true;
@@ -288,10 +299,9 @@ private:
     selfHealRebootPending = true;
     selfHealState = RS485_SELF_HEAL_REBOOT_PENDING;
     selfHealRebootCount++;
-    errorFlag = ERR_SYS_REBOOT;
     doReboot = true;
-    USER_PRINT(F("86Box RS485 self-heal requesting reboot: "));
-    USER_PRINTLN(selfHealStateText());
+    DEBUG_PRINT(F("86Box RS485 self-heal requesting reboot: "));
+    DEBUG_PRINTLN(selfHealStateText());
 #endif
   }
 
@@ -401,7 +411,7 @@ private:
   {
     if (!psuRelayReady) return;
     writePsuRelayOutput(false);
-    pinManager.deallocatePin(psuRelayPin, PinOwner::UM_Unspecified);
+    PinManager::deallocatePin(psuRelayPin, PinOwner::UM_Unspecified);
     psuRelayReady = false;
     psuRelayOn = false;
     psuRelayOffPending = false;
@@ -415,7 +425,7 @@ private:
 
     if (!psuRelayEnabled || psuRelayPin < 0) return;
 
-    if (!pinManager.allocatePin(psuRelayPin, true, PinOwner::UM_Unspecified)) {
+    if (!PinManager::allocatePin(psuRelayPin, true, PinOwner::UM_Unspecified)) {
       psuRelayFault = true;
       psuRelayReady = false;
       return;
@@ -678,10 +688,10 @@ private:
 #ifndef USERMOD_86BOX_RS485_DISABLE_CONFIG_APPLY
     bool reconnectWifi = hasNetworkCredentials(root);
     deserializeConfig(root, false);
-    serializeConfig();
+    serializeConfigToFS();
     if (reconnectWifi) {
       forceReconnect = true;
-      USER_PRINTLN(F("86Box RS485 bridge: WiFi reconnect requested"));
+      DEBUG_PRINTLN(F("86Box RS485 bridge: WiFi reconnect requested"));
     }
 #else
     (void)root;
@@ -767,10 +777,11 @@ private:
   }
 
 public:
-  Usermod86BoxRs485Bridge() : Usermod("86Box RS485 Bridge", true), bridgeSerial(USERMOD_86BOX_RS485_UART) {}
+  Usermod86BoxRs485Bridge() : bridgeSerial(USERMOD_86BOX_RS485_UART) {}
 
   void setup() override
   {
+    if (!enabled) return;
     if (!configureRs485Pins()) return;
 
     lineBuffer.reserve(USERMOD_86BOX_RS485_LINE_MAX);
@@ -778,7 +789,7 @@ public:
     serialReady = true;
     configurePsuRelay();
     initDone = true;
-    USER_PRINTF("86Box RS485 bridge ready: UART%d TX%d RX%d @ %lu\n",
+    DEBUG_PRINTF("86Box RS485 bridge ready: UART%d TX%d RX%d @ %lu\n",
                 USERMOD_86BOX_RS485_UART,
                 USERMOD_86BOX_RS485_TX,
                 USERMOD_86BOX_RS485_RX,
@@ -787,6 +798,7 @@ public:
 
   void loop() override
   {
+    if (!enabled) return;
     servicePsuRelay();
     serviceRs485LinkState();
     serviceSelfHeal();
@@ -858,39 +870,55 @@ public:
 
   void addToConfig(JsonObject &root) override
   {
-    JsonObject top = root.createNestedObject(_name);
-    top[F("enabled")] = enabled;
-    top[F("psuRelayEnabled")] = psuRelayEnabled;
-    top[F("psuRelayPin")] = psuRelayPin;
-    top[F("psuRelayActiveHigh")] = psuRelayActiveHigh;
-    top[F("psuRelayOnLeadMs")] = psuRelayOnLeadMs;
-    top[F("psuRelayOffHoldMs")] = psuRelayOffHoldMs;
-    top[F("psuRelayMinCycleMs")] = psuRelayMinCycleMs;
+    JsonObject top = root.createNestedObject(FPSTR(_name));
+    top[FPSTR(_enabled)] = enabled;
+    top[FPSTR(_psuRelayEnabled)] = psuRelayEnabled;
+    top[FPSTR(_psuRelayPin)] = psuRelayPin;
+    top[FPSTR(_psuRelayActiveHigh)] = psuRelayActiveHigh;
+    top[FPSTR(_psuRelayOnLeadMs)] = psuRelayOnLeadMs;
+    top[FPSTR(_psuRelayOffHoldMs)] = psuRelayOffHoldMs;
+    top[FPSTR(_psuRelayMinCycleMs)] = psuRelayMinCycleMs;
   }
 
   bool readFromConfig(JsonObject &root) override
   {
-    JsonObject top = root[_name];
+    JsonObject top = root[FPSTR(_name)];
     if (top.isNull()) return false;
 
+    bool oldEnabled = enabled;
     bool oldRelayEnabled = psuRelayEnabled;
     int8_t oldRelayPin = psuRelayPin;
     bool oldRelayActiveHigh = psuRelayActiveHigh;
 
     bool configComplete = true;
-    configComplete &= getJsonValue(top[F("enabled")], enabled);
-    configComplete &= getJsonValue(top[F("psuRelayEnabled")], psuRelayEnabled);
-    configComplete &= getJsonValue(top[F("psuRelayPin")], psuRelayPin);
-    configComplete &= getJsonValue(top[F("psuRelayActiveHigh")], psuRelayActiveHigh);
-    configComplete &= getJsonValue(top[F("psuRelayOnLeadMs")], psuRelayOnLeadMs);
-    configComplete &= getJsonValue(top[F("psuRelayOffHoldMs")], psuRelayOffHoldMs);
-    configComplete &= getJsonValue(top[F("psuRelayMinCycleMs")], psuRelayMinCycleMs);
+    configComplete &= getJsonValue(top[FPSTR(_enabled)], enabled);
+    configComplete &= getJsonValue(top[FPSTR(_psuRelayEnabled)], psuRelayEnabled);
+    configComplete &= getJsonValue(top[FPSTR(_psuRelayPin)], psuRelayPin);
+    configComplete &= getJsonValue(top[FPSTR(_psuRelayActiveHigh)], psuRelayActiveHigh);
+    configComplete &= getJsonValue(top[FPSTR(_psuRelayOnLeadMs)], psuRelayOnLeadMs);
+    configComplete &= getJsonValue(top[FPSTR(_psuRelayOffHoldMs)], psuRelayOffHoldMs);
+    configComplete &= getJsonValue(top[FPSTR(_psuRelayMinCycleMs)], psuRelayMinCycleMs);
     clampPsuRelayConfig();
 
-    if (initDone && (oldRelayEnabled != psuRelayEnabled || oldRelayPin != psuRelayPin || oldRelayActiveHigh != psuRelayActiveHigh)) {
+    if (initDone && !enabled && oldEnabled != enabled) {
+      releasePsuRelay();
+      releaseRs485Pins();
+      serialReady = false;
+    } else if (initDone && enabled && oldEnabled != enabled) {
+      setup();
+    } else if (initDone && enabled && (oldRelayEnabled != psuRelayEnabled || oldRelayPin != psuRelayPin || oldRelayActiveHigh != psuRelayActiveHigh)) {
       configurePsuRelay();
     }
 
     return configComplete;
   }
 };
+
+const char Usermod86BoxRs485Bridge::_name[] PROGMEM = "86Box RS485 Bridge";
+const char Usermod86BoxRs485Bridge::_enabled[] PROGMEM = "enabled";
+const char Usermod86BoxRs485Bridge::_psuRelayEnabled[] PROGMEM = "psuRelayEnabled";
+const char Usermod86BoxRs485Bridge::_psuRelayPin[] PROGMEM = "psuRelayPin";
+const char Usermod86BoxRs485Bridge::_psuRelayActiveHigh[] PROGMEM = "psuRelayActiveHigh";
+const char Usermod86BoxRs485Bridge::_psuRelayOnLeadMs[] PROGMEM = "psuRelayOnLeadMs";
+const char Usermod86BoxRs485Bridge::_psuRelayOffHoldMs[] PROGMEM = "psuRelayOffHoldMs";
+const char Usermod86BoxRs485Bridge::_psuRelayMinCycleMs[] PROGMEM = "psuRelayMinCycleMs";
