@@ -605,6 +605,9 @@ private:
     copyJsonValue(targetSegment, sourceSegment, "c1");
     copyJsonValue(targetSegment, sourceSegment, "c2");
     copyJsonValue(targetSegment, sourceSegment, "c3");
+    copyJsonValue(targetSegment, sourceSegment, "o1");
+    copyJsonValue(targetSegment, sourceSegment, "o2");
+    copyJsonValue(targetSegment, sourceSegment, "o3");
     copyJsonValue(targetSegment, sourceSegment, "cct");
 
     JsonArray sourceColors = sourceSegment[F("col")].as<JsonArray>();

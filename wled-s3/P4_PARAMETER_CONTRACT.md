@@ -52,6 +52,9 @@ These JSON keys must be accepted by the S3 bridge and forwarded into WLED's stat
 | `seg[0].c1` | 0..255 | Lights effect parameter controls | WLED effect custom slider 1. |
 | `seg[0].c2` | 0..255 | Lights effect parameter controls | WLED effect custom slider 2. |
 | `seg[0].c3` | 0..255 | Lights effect parameter controls | WLED effect custom slider 3. |
+| `seg[0].o1` | boolean | Lights effect option controls | WLED effect option toggle 1. |
+| `seg[0].o2` | boolean | Lights effect option controls | WLED effect option toggle 2. |
+| `seg[0].o3` | boolean | Lights effect option controls | WLED effect option toggle 3. |
 | `seg[0].col` | up to three RGB triples, each channel 0..255 | Lights primary and secondary color controls | Segment color slots; P4 currently edits `col[0]` and `col[1]` while preserving `col[2]` from readback. |
 | `ps` | WLED preset ID; current UI sends `1..250` | Lights preset panels/command menu | Apply a saved WLED preset. |
 | `psave` | WLED preset ID; current UI sends `1..250` | Lights preset panels/command menu | Save current WLED state into a preset slot. |
@@ -77,6 +80,7 @@ Example direct controls from the Lights page:
 {"seg":[{"c1":64}]}
 {"seg":[{"c2":128}]}
 {"seg":[{"c3":16}]}
+{"seg":[{"o1":true}]}
 {"seg":[{"col":[[255,64,0],[0,64,255],[0,0,0]]}]}
 {"ps":3}
 {"psave":3,"n":"Evening","ib":true,"sb":true,"sc":true}
@@ -137,6 +141,9 @@ The P4 polls with `{"v":true}` and parses these response fields. The S3 bridge i
 | `state.seg[0].c1` | 0..255 | Lights page custom slider 1 sync. |
 | `state.seg[0].c2` | 0..255 | Lights page custom slider 2 sync. |
 | `state.seg[0].c3` | 0..255 | Lights page custom slider 3 sync. |
+| `state.seg[0].o1` | boolean | Lights page option toggle 1 sync. |
+| `state.seg[0].o2` | boolean | Lights page option toggle 2 sync. |
+| `state.seg[0].o3` | boolean | Lights page option toggle 3 sync. |
 | `state.seg[0].cct` | 0..255 | Segment color temperature readback. |
 | `state.seg[0].col` | up to three RGB triples | Primary/secondary color UI readback. |
 | `info.ver` | string, stored in 24-byte P4 buffer | Info and Settings WLED status. |

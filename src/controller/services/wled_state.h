@@ -33,6 +33,9 @@ typedef struct {
     uint8_t  seg0_c1;
     uint8_t  seg0_c2;
     uint8_t  seg0_c3;
+    bool     seg0_o1;
+    bool     seg0_o2;
+    bool     seg0_o3;
     uint8_t  seg0_cct;
     uint8_t  seg0_col[3][3];
 

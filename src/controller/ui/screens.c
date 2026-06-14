@@ -328,6 +328,9 @@ static lv_obj_t *s_effect_param_rows[WLED_EFFECT_PARAM_COUNT];
 static lv_obj_t *s_effect_param_labels[WLED_EFFECT_PARAM_COUNT];
 static lv_obj_t *s_effect_param_sliders[WLED_EFFECT_PARAM_COUNT];
 static lv_obj_t *s_effect_param_value_labels[WLED_EFFECT_PARAM_COUNT];
+static lv_obj_t *s_effect_option_rows[WLED_EFFECT_OPTION_COUNT];
+static lv_obj_t *s_effect_option_labels[WLED_EFFECT_OPTION_COUNT];
+static lv_obj_t *s_effect_option_switches[WLED_EFFECT_OPTION_COUNT];
 static lv_obj_t *s_preset_list;
 static lv_obj_t *s_preset_save_bri_switch;
 static lv_obj_t *s_preset_save_bounds_switch;
@@ -560,6 +563,12 @@ static const char *effect_param_key(size_t index)
     return index < WLED_EFFECT_PARAM_COUNT ? keys[index] : "sx";
 }
 
+static const char *effect_option_key(size_t index)
+{
+    static const char *keys[WLED_EFFECT_OPTION_COUNT] = {"o1", "o2", "o3"};
+    return index < WLED_EFFECT_OPTION_COUNT ? keys[index] : "o1";
+}
+
 static uint8_t effect_param_value(const wled_state_t *ws, size_t index)
 {
     if (!ws) return 0;
@@ -571,6 +580,24 @@ static uint8_t effect_param_value(const wled_state_t *ws, size_t index)
     case 4: return ws->seg0_c3;
     default: return 0;
     }
+}
+
+static bool effect_option_value(const wled_state_t *ws, size_t index)
+{
+    if (!ws) return false;
+    switch (index) {
+    case 0: return ws->seg0_o1;
+    case 1: return ws->seg0_o2;
+    case 2: return ws->seg0_o3;
+    default: return false;
+    }
+}
+
+static void switch_set_checked_if_changed(lv_obj_t *sw, bool checked)
+{
+    if (!sw || lv_obj_has_state(sw, LV_STATE_CHECKED) == checked) return;
+    if (checked) lv_obj_add_state(sw, LV_STATE_CHECKED);
+    else lv_obj_clear_state(sw, LV_STATE_CHECKED);
 }
 
 static void effect_param_value_label_set(size_t index, uint8_t value)
@@ -680,6 +707,17 @@ static void lights_effect_selector_set(uint8_t fx)
         if (s_effect_param_rows[i]) lv_obj_clear_flag(s_effect_param_rows[i], LV_OBJ_FLAG_HIDDEN);
         label_set_text_if_changed(s_effect_param_labels[i], label);
     }
+
+    for (size_t i = 0; i < WLED_EFFECT_OPTION_COUNT; i++) {
+        const char *label = item ? item->options[i] : "";
+        if (!label || label[0] == '\0') {
+            if (s_effect_option_rows[i]) lv_obj_add_flag(s_effect_option_rows[i], LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+
+        if (s_effect_option_rows[i]) lv_obj_clear_flag(s_effect_option_rows[i], LV_OBJ_FLAG_HIDDEN);
+        label_set_text_if_changed(s_effect_option_labels[i], label);
+    }
 }
 
 static void lights_palette_preview_set(uint8_t pal)
@@ -722,6 +760,9 @@ static void lights_apply_wled_state(const wled_state_t *ws)
         uint8_t value = effect_param_value(ws, i);
         slider_set_value_if_changed(s_effect_param_sliders[i], value);
         effect_param_value_label_set(i, value);
+    }
+    for (size_t i = 0; i < WLED_EFFECT_OPTION_COUNT; i++) {
+        switch_set_checked_if_changed(s_effect_option_switches[i], effect_option_value(ws, i));
     }
     preset_sync_labels_refresh();
     s_ui_updating = false;
@@ -1967,6 +2008,17 @@ static void effect_param_changed(lv_event_t *e)
     cmd_tx_send_json(json);
 }
 
+static void effect_option_changed(lv_event_t *e)
+{
+    if (s_ui_updating) return;
+    size_t index = (size_t)(intptr_t)lv_event_get_user_data(e);
+    if (index >= WLED_EFFECT_OPTION_COUNT) return;
+    bool checked = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    char json[48];
+    snprintf(json, sizeof(json), "{\"seg\":[{\"%s\":%s}]}", effect_option_key(index), checked ? "true" : "false");
+    cmd_tx_send_json(json);
+}
+
 static void power_clicked(lv_event_t *e)
 {
     (void)e;
@@ -2098,6 +2150,37 @@ static void effect_param_row_create(lv_obj_t *parent, size_t index, lv_color_t c
     s_effect_param_labels[index] = label;
     s_effect_param_sliders[index] = slider;
     s_effect_param_value_labels[index] = value;
+}
+
+static void effect_option_row_create(lv_obj_t *parent, size_t index)
+{
+    if (index >= WLED_EFFECT_OPTION_COUNT) return;
+
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 10, LV_PART_MAIN);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *label = lv_label_create(row);
+    lv_label_set_text(label, "Option");
+    lv_obj_set_flex_grow(label, 1);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(label, THEME_TEXT_SECONDARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, THEME_FONT_LABEL, LV_PART_MAIN);
+
+    lv_obj_t *sw = lv_switch_create(row);
+    lv_obj_set_size(sw, 52, 28);
+    lv_obj_set_style_bg_color(sw, THEME_SURFACE_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(sw, theme_primary_color(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_opa(sw, LV_OPA_COVER, LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(sw, effect_option_changed, LV_EVENT_VALUE_CHANGED, (void *)(intptr_t)index);
+
+    s_effect_option_rows[index] = row;
+    s_effect_option_labels[index] = label;
+    s_effect_option_switches[index] = sw;
 }
 
 static void transition_changed(lv_event_t *e)
@@ -2914,6 +2997,9 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
     };
     for (size_t i = 0; i < WLED_EFFECT_PARAM_COUNT; i++) {
         effect_param_row_create(tune_card, i, param_colors[i]);
+    }
+    for (size_t i = 0; i < WLED_EFFECT_OPTION_COUNT; i++) {
+        effect_option_row_create(tune_card, i);
     }
     lights_effect_selector_set(0);
 

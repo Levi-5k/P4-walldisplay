@@ -51,6 +51,7 @@ static bool json_bool(const cJSON *obj, const char *key, bool def)
 {
     const cJSON *item = cJSON_GetObjectItem(obj, key);
     if (cJSON_IsBool(item)) return cJSON_IsTrue(item);
+    if (cJSON_IsNumber(item)) return item->valueint != 0;
     return def;
 }
 
@@ -131,6 +132,9 @@ void wled_state_parse_json(const char *json, size_t len)
                 s_state.seg0_c1  = (uint8_t)json_int(seg0, "c1", s_state.seg0_c1);
                 s_state.seg0_c2  = (uint8_t)json_int(seg0, "c2", s_state.seg0_c2);
                 s_state.seg0_c3  = (uint8_t)json_int(seg0, "c3", s_state.seg0_c3);
+                s_state.seg0_o1  = json_bool(seg0, "o1", s_state.seg0_o1);
+                s_state.seg0_o2  = json_bool(seg0, "o2", s_state.seg0_o2);
+                s_state.seg0_o3  = json_bool(seg0, "o3", s_state.seg0_o3);
                 s_state.seg0_cct = (uint8_t)json_int(seg0, "cct", s_state.seg0_cct);
 
                 cJSON *col_arr = cJSON_GetObjectItem(seg0, "col");

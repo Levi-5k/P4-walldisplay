@@ -8,11 +8,13 @@ extern "C" {
 #endif
 
 #define WLED_EFFECT_PARAM_COUNT 5
+#define WLED_EFFECT_OPTION_COUNT 3
 
 typedef struct {
     uint8_t id;
     const char *name;
     const char *params[WLED_EFFECT_PARAM_COUNT];
+    const char *options[WLED_EFFECT_OPTION_COUNT];
 } wled_effect_catalog_item_t;
 
 size_t wled_effect_catalog_count(void);
