@@ -10,6 +10,7 @@ static const char *TAG = "wled_state";
 #define MAX_WLED_STATE_SUBS 4
 
 static wled_preset_item_t s_presets[WLED_PRESET_LIST_MAX];
+static wled_segment_t s_segments[WLED_SEGMENT_LIST_MAX];
 static wled_state_t s_state;
 static struct {
     wled_state_cb_t cb;
@@ -21,7 +22,9 @@ void wled_state_init(void)
 {
     memset(&s_state, 0, sizeof(s_state));
     memset(s_presets, 0, sizeof(s_presets));
+    memset(s_segments, 0, sizeof(s_segments));
     s_state.presets = s_presets;
+    s_state.segments = s_segments;
     s_state.ps = -1;
     s_state.pl = -1;
 }
@@ -29,6 +32,7 @@ void wled_state_init(void)
 void wled_state_get(wled_state_t *out)
 {
     if (!s_state.presets) s_state.presets = s_presets;
+    if (!s_state.segments) s_state.segments = s_segments;
     if (out) *out = s_state;
 }
 
@@ -62,6 +66,17 @@ static void copy_preset_name(char *dst, size_t dst_len, const char *src, uint16_
         snprintf(dst, dst_len, "%s", src);
     } else {
         snprintf(dst, dst_len, "Preset %u", (unsigned)id);
+    }
+    dst[dst_len - 1] = '\0';
+}
+
+static void copy_segment_name(char *dst, size_t dst_len, const char *src, uint8_t id)
+{
+    if (!dst || dst_len == 0) return;
+    if (src && src[0]) {
+        snprintf(dst, dst_len, "%s", src);
+    } else {
+        snprintf(dst, dst_len, "Segment %u", (unsigned)id);
     }
     dst[dst_len - 1] = '\0';
 }
@@ -103,6 +118,80 @@ static void parse_presets(const cJSON *presets)
     }
 }
 
+static void parse_segment_colors(cJSON *seg, wled_segment_t *out)
+{
+    if (!seg || !out) return;
+    cJSON *col_arr = cJSON_GetObjectItem(seg, "col");
+    if (!cJSON_IsArray(col_arr)) return;
+
+    for (int c = 0; c < 3 && c < cJSON_GetArraySize(col_arr); c++) {
+        cJSON *rgb = cJSON_GetArrayItem(col_arr, c);
+        if (!cJSON_IsArray(rgb)) continue;
+        for (int ch = 0; ch < 3 && ch < cJSON_GetArraySize(rgb); ch++) {
+            cJSON *v = cJSON_GetArrayItem(rgb, ch);
+            if (cJSON_IsNumber(v)) out->col[c][ch] = (uint8_t)v->valueint;
+        }
+    }
+}
+
+static void parse_segments(const cJSON *seg_arr)
+{
+    s_state.segment_count = 0;
+    s_state.segments_truncated = false;
+    s_state.segments = s_segments;
+    if (!cJSON_IsArray(seg_arr)) return;
+
+    const int count = cJSON_GetArraySize(seg_arr);
+    for (int i = 0; i < count; i++) {
+        cJSON *seg = cJSON_GetArrayItem(seg_arr, i);
+        if (!cJSON_IsObject(seg)) continue;
+
+        if (s_state.segment_count >= WLED_SEGMENT_LIST_MAX) {
+            s_state.segments_truncated = true;
+            break;
+        }
+
+        wled_segment_t *out = &s_segments[s_state.segment_count];
+        memset(out, 0, sizeof(*out));
+        out->id = (uint8_t)json_int(seg, "id", i);
+        copy_segment_name(out->name, sizeof(out->name), cJSON_GetStringValue(cJSON_GetObjectItem(seg, "n")), out->id);
+        out->on = json_bool(seg, "on", true);
+        out->selected = json_bool(seg, "sel", false);
+        out->reverse = json_bool(seg, "rev", false);
+        out->mirror = json_bool(seg, "mi", false);
+        out->reverse_y = json_bool(seg, "rY", false);
+        out->mirror_y = json_bool(seg, "mY", false);
+        out->transpose = json_bool(seg, "tp", false);
+        out->freeze = json_bool(seg, "frz", false);
+        out->start = (uint16_t)json_int(seg, "start", 0);
+        out->stop = (uint16_t)json_int(seg, "stop", 0);
+        out->start_y = (uint16_t)json_int(seg, "startY", 0);
+        out->stop_y = (uint16_t)json_int(seg, "stopY", 1);
+        out->len = (uint16_t)json_int(seg, "len", out->stop > out->start ? out->stop - out->start : 0);
+        out->group = (uint16_t)json_int(seg, "grp", 1);
+        out->spacing = (uint16_t)json_int(seg, "spc", 0);
+        out->offset = (uint16_t)json_int(seg, "of", 0);
+        out->brightness = (uint8_t)json_int(seg, "bri", 255);
+        out->set = (uint8_t)json_int(seg, "set", 0);
+        out->sound_sim = (uint8_t)json_int(seg, "si", 0);
+        out->map_1d_2d = (uint8_t)json_int(seg, "m12", 0);
+        out->blend_mode = (uint8_t)json_int(seg, "bm", 0);
+        out->fx = (uint8_t)json_int(seg, "fx", 0);
+        out->pal = (uint8_t)json_int(seg, "pal", 0);
+        out->sx = (uint8_t)json_int(seg, "sx", 0);
+        out->ix = (uint8_t)json_int(seg, "ix", 0);
+        out->c1 = (uint8_t)json_int(seg, "c1", 0);
+        out->c2 = (uint8_t)json_int(seg, "c2", 0);
+        out->c3 = (uint8_t)json_int(seg, "c3", 0);
+        out->o1 = json_bool(seg, "o1", false);
+        out->o2 = json_bool(seg, "o2", false);
+        out->o3 = json_bool(seg, "o3", false);
+        out->cct = (uint8_t)json_int(seg, "cct", 0);
+        parse_segment_colors(seg, out);
+        s_state.segment_count++;
+    }
+}
+
 void wled_state_parse_json(const char *json, size_t len)
 {
     if (!json || len == 0) return;
@@ -120,11 +209,28 @@ void wled_state_parse_json(const char *json, size_t len)
         s_state.on = json_bool(state, "on", s_state.on);
         s_state.bri = (uint8_t)json_int(state, "bri", s_state.bri);
         s_state.transition = (uint8_t)json_int(state, "transition", s_state.transition);
+        s_state.mainseg = (uint8_t)json_int(state, "mainseg", s_state.mainseg);
 
         cJSON *seg_arr = cJSON_GetObjectItem(state, "seg");
         if (cJSON_IsArray(seg_arr) && cJSON_GetArraySize(seg_arr) > 0) {
+            parse_segments(seg_arr);
             cJSON *seg0 = cJSON_GetArrayItem(seg_arr, 0);
             if (seg0) {
+                if (s_state.segment_count > 0) {
+                    const wled_segment_t *first = &s_segments[0];
+                    s_state.seg0_fx = first->fx;
+                    s_state.seg0_pal = first->pal;
+                    s_state.seg0_sx = first->sx;
+                    s_state.seg0_ix = first->ix;
+                    s_state.seg0_c1 = first->c1;
+                    s_state.seg0_c2 = first->c2;
+                    s_state.seg0_c3 = first->c3;
+                    s_state.seg0_o1 = first->o1;
+                    s_state.seg0_o2 = first->o2;
+                    s_state.seg0_o3 = first->o3;
+                    s_state.seg0_cct = first->cct;
+                    memcpy(s_state.seg0_col, first->col, sizeof(s_state.seg0_col));
+                } else {
                 s_state.seg0_fx  = (uint8_t)json_int(seg0, "fx", s_state.seg0_fx);
                 s_state.seg0_pal = (uint8_t)json_int(seg0, "pal", s_state.seg0_pal);
                 s_state.seg0_sx  = (uint8_t)json_int(seg0, "sx", s_state.seg0_sx);
@@ -149,6 +255,7 @@ void wled_state_parse_json(const char *json, size_t len)
                             }
                         }
                     }
+                }
                 }
             }
         }

@@ -27,7 +27,7 @@ The selected S3 board is Waveshare `ESP32-S3-Relay-1CH`, SKU `32152`, Part No. `
 - S3 RS-485 pins: UART1, TX GPIO17, RX GPIO18, DE/RE GPIO21.
 - Waveshare's product page describes RS-485 direction as controlled by main-controller hardware flow settings; the pinout image labels GPIO21 as RS485 EN. The overlay drives GPIO21 manually through the bridge usermod.
 - P4 TX command payload limit: less than 512 bytes, before the newline.
-- P4 RX line limit: 16384 bytes. S3 snapshots must stay comfortably below this; the larger budget is for the named WLED preset list.
+- P4 RX line limit: 32768 bytes. S3 snapshots must stay comfortably below this; the larger budget is for the named WLED preset list plus full segment readback.
 - S3 bridge RX line limit: 1536 bytes by default.
 - Poll cadence: P4 sends `{"v":true}` every 5 seconds.
 - Online timeout: P4 marks WLED stale after 30 seconds without a valid response.
@@ -43,6 +43,7 @@ These JSON keys must be accepted by the S3 bridge and forwarded into WLED's stat
 | `on` | boolean | Lights power button and WLED reconciliation | Master LED output on/off. |
 | `bri` | 0..255 | P4 brightness 0..100% converted to WLED scale | Master WLED brightness. |
 | `transition` | WLED transition value; currently `7` | P4 LED state publisher | Fade time for power, brightness, and CCT updates. |
+| `mainseg` | segment index | Lights Segments tab | Sets WLED's main segment, matching the WLED webpage segment selection behavior. |
 | `seg[0].id` | segment index; currently `0` | P4 CCT publisher | Targets segment 0 for color temperature updates. |
 | `seg[0].cct` | 0..255 | P4 kelvin mapped through `kelvin_min..kelvin_max` | Segment color temperature. |
 | `seg[0].fx` | 0..255 | Lights effect previous/next controls | Segment effect ID. |
@@ -56,6 +57,22 @@ These JSON keys must be accepted by the S3 bridge and forwarded into WLED's stat
 | `seg[0].o2` | boolean | Lights effect option controls | WLED effect option toggle 2. |
 | `seg[0].o3` | boolean | Lights effect option controls | WLED effect option toggle 3. |
 | `seg[0].col` | up to three RGB triples, each channel 0..255 | Lights primary and secondary color controls | Segment color slots; P4 currently edits `col[0]` and `col[1]` while preserving `col[2]` from readback. |
+| `seg.id` | segment index | Lights Segments tab | Targets one WLED segment for segment-tab edits. |
+| `seg.n` | string, up to WLED segment name limits | Lights Segments tab name field | Segment display name. |
+| `seg.start` / `seg.stop` | LED bounds | Lights Segments tab bounds controls | Segment start and exclusive stop LED. `stop:0` deletes a segment when more than one exists. |
+| `seg.startY` / `seg.stopY` | matrix Y bounds | Lights Segments tab 2D bounds controls | 2D matrix start and exclusive stop row. |
+| `seg.grp` / `seg.spc` / `seg.of` | WLED grouping, spacing, offset values | Lights Segments tab bounds controls | Segment grouping, spacing, and offset. |
+| `seg.on` | boolean | Lights Segments tab power switch | Per-segment output enable. |
+| `seg.bri` | 1..255 | Lights Segments tab opacity slider | Per-segment opacity/brightness. |
+| `seg.sel` | boolean | Lights Segments tab selected switch | Selects segment for WLED multi-segment edits. |
+| `seg.rev` / `seg.mi` | boolean | Lights Segments tab flags | Reverse direction and mirror effect. |
+| `seg.rY` / `seg.mY` / `seg.tp` | boolean | Lights Segments tab 2D flags | Reverse Y, mirror Y, and transpose for matrix segments. |
+| `seg.frz` | boolean | Lights Segments tab freeze switch | Freezes/unfreezes the segment. |
+| `seg.set` | 0..3 | Lights Segments tab group dropdown | WLED segment set/group marker. |
+| `seg.bm` | 0..16 | Lights Segments tab blend dropdown | WLED segment blend mode. |
+| `seg.si` | 0..3 | Lights Segments tab sound simulation dropdown | WLED sound simulation mode for non-audio-reactive effects. |
+| `seg.m12` | 0..4 | Lights Segments tab 1D expand dropdown | WLED 1D-to-2D mapping mode. |
+| `seg.rpt` | boolean | Lights Segments tab Repeat action | Repeats the segment geometry until LEDs are filled, matching WLED webpage behavior. |
 | `ps` | WLED preset ID; current UI sends `1..250` | Lights preset panels/command menu | Apply a saved WLED preset. |
 | `psave` | WLED preset ID; current UI sends `1..250` | Lights preset panels/command menu | Save current WLED state into a preset slot. |
 | `n` | string, used with `psave` | Lights preset panel name field | WLED preset name stored in `/presets.json`. |
@@ -82,6 +99,10 @@ Example direct controls from the Lights page:
 {"seg":[{"c3":16}]}
 {"seg":[{"o1":true}]}
 {"seg":[{"col":[[255,64,0],[0,64,255],[0,0,0]]}]}
+{"mainseg":1,"seg":{"id":1,"sel":true}}
+{"seg":{"id":1,"n":"Shelf","start":60,"stop":120,"grp":1,"spc":0,"of":0}}
+{"seg":{"id":1,"on":true,"bri":192,"sel":true,"rev":false,"mi":false,"frz":false}}
+{"seg":{"id":2,"stop":0}}
 {"ps":3}
 {"psave":3,"n":"Evening","ib":true,"sb":true,"sc":true}
 {"pdel":3}
@@ -125,7 +146,7 @@ The `wled-16-non-audio` branch intentionally targets official WLED `v16.0.0` wit
 
 ## Snapshot Fields Read By P4
 
-The P4 polls with `{"v":true}` and parses these response fields. The S3 bridge intentionally compacts snapshots to this set so the response fits inside the P4 16384-byte receive line.
+The P4 polls with `{"v":true}` and parses these response fields. The S3 bridge intentionally compacts snapshots to this set so the response fits inside the P4 32768-byte receive line.
 
 | JSON path | Type/range | P4 use |
 | --- | --- | --- |
@@ -134,18 +155,17 @@ The P4 polls with `{"v":true}` and parses these response fields. The S3 bridge i
 | `state.transition` | WLED transition value | Stored in `wled_state_t` for status/readback. |
 | `state.ps` | integer, `-1`/missing when no active preset | Lights preset active-panel state. |
 | `state.pl` | integer, `-1`/missing when no active playlist | Lights preset panel playlist readback. |
-| `state.seg[0].fx` | 0..255 | Lights page effect label and next/previous baseline. |
-| `state.seg[0].pal` | 0..255 | Lights page palette label and next/previous baseline. |
-| `state.seg[0].sx` | 0..255 | Lights page speed slider sync. |
-| `state.seg[0].ix` | 0..255 | Lights page intensity slider sync. |
-| `state.seg[0].c1` | 0..255 | Lights page custom slider 1 sync. |
-| `state.seg[0].c2` | 0..255 | Lights page custom slider 2 sync. |
-| `state.seg[0].c3` | 0..255 | Lights page custom slider 3 sync. |
-| `state.seg[0].o1` | boolean | Lights page option toggle 1 sync. |
-| `state.seg[0].o2` | boolean | Lights page option toggle 2 sync. |
-| `state.seg[0].o3` | boolean | Lights page option toggle 3 sync. |
-| `state.seg[0].cct` | 0..255 | Segment color temperature readback. |
-| `state.seg[0].col` | up to three RGB triples | Primary/secondary color UI readback. |
+| `state.mainseg` | segment index | Lights Segments tab marks the current main segment. |
+| `state.seg[]` | array, capped by P4 at 32 active segments | Lights Segments tab renders one expandable WLED-style panel per segment. |
+| `state.seg[].id` / `n` | index and optional name | Segment panel identity and title. |
+| `state.seg[].start` / `stop` / `len` | LED bounds and length | Segment bounds controls and summary text. |
+| `state.seg[].startY` / `stopY` | matrix bounds | 2D segment controls. |
+| `state.seg[].grp` / `spc` / `of` | grouping, spacing, offset | Segment advanced controls. |
+| `state.seg[].on` / `bri` / `sel` / `frz` | booleans and opacity | Segment power, opacity, selected, and freeze controls. |
+| `state.seg[].rev` / `mi` / `rY` / `mY` / `tp` | booleans | Segment reverse/mirror/2D flags. |
+| `state.seg[].set` / `bm` / `si` / `m12` | small integers | Segment set group, blend mode, sound simulation, and 1D expand dropdowns. |
+| `state.seg[0].fx` / `pal` / `sx` / `ix` / `c1` / `c2` / `c3` / `o1` / `o2` / `o3` | WLED effect fields | Lights Effects tab readback; segment 0 remains the compatibility baseline. |
+| `state.seg[0].cct` / `col` | color temperature and up to three RGB triples | P4 color/kelvin readback; segment 0 remains the compatibility baseline. |
 | `info.ver` | string, stored in 24-byte P4 buffer | Info and Settings WLED status. |
 | `info.leds.count` | integer, stored as `uint16_t` | Info and Settings WLED status. |
 | `info.uptime` | seconds | Info/readback state. |
@@ -188,6 +208,7 @@ These are not runtime settings the P4 changes over RS-485. The board-level items
 | `extends` | `env:esp32s3dev_16MB_opi` | Official WLED 16 parent for ESP32-S3 with 16 MB flash and OPI PSRAM. |
 | `board_build.arduino.memory_type` | `qio_opi` via local board file | Matches external QIO flash plus OPI PSRAM assumption for ESP32-S3R8-class hardware. |
 | `board_upload.flash_size` / partitions | `16MB`, `${esp32.extreme_partitions}` | Confirm OTA/filesystem layout is acceptable before production flashing. |
+| `upload_speed` | `460800` | Stable USB flashing speed for the Waveshare S3 relay board; 921600 has dropped during app writes on this hardware. |
 | `custom_usermods` | `86box_rs485_bridge` | WLED 16 dynamic usermod loader; AudioReactive is intentionally omitted on this branch. |
 | `USERMOD_86BOX_RS485_UART` | `1` | S3 UART connected to RS-485 transceiver. |
 | `USERMOD_86BOX_RS485_TX` | `17` | S3 UART TX GPIO. |

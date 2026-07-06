@@ -50,7 +50,7 @@ static const char *TAG = "services";
 
 #define CMD_QUEUE_LEN       16
 #define CMD_JSON_MAX        512
-#define RS485_RX_LINE_MAX   16384
+#define RS485_RX_LINE_MAX   32768
 #define RS485_UART_BUF_SIZE 8192
 #define CMD_TX_REPLY_GUARD_MS 200u
 #define CMD_TX_TASK_STACK_BYTES 4096

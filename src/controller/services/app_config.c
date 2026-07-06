@@ -265,6 +265,9 @@ void app_config_tuning_defaults(app_tuning_config_t *out)
     out->wled_poll_s = 5;
     out->wled_stale_s = 30;
     out->wled_hue_update_hz = 5;
+    out->power_preset_mode_enabled = false;
+    out->power_on_preset_id = 0;
+    out->power_off_preset_id = 0;
     out->light_safety_auto_off_enabled = true;
     out->light_safety_auto_off_hours = 12;
     out->auto_brightness_enabled = false;
@@ -323,6 +326,9 @@ static void app_config_tuning_clamp(app_tuning_config_t *cfg)
     cfg->wled_stale_s = clamp_u8(cfg->wled_stale_s, 10, 120);
     if (cfg->wled_stale_s < cfg->wled_poll_s * 2) cfg->wled_stale_s = cfg->wled_poll_s * 2;
     cfg->wled_hue_update_hz = clamp_u8(cfg->wled_hue_update_hz, 1, 5);
+    cfg->power_preset_mode_enabled = cfg->power_preset_mode_enabled ? true : false;
+    cfg->power_on_preset_id = clamp_u16(cfg->power_on_preset_id, 0, 250);
+    cfg->power_off_preset_id = clamp_u16(cfg->power_off_preset_id, 0, 250);
     cfg->light_safety_auto_off_enabled = cfg->light_safety_auto_off_enabled ? true : false;
     cfg->light_safety_auto_off_hours = clamp_u8(cfg->light_safety_auto_off_hours, 1, 24);
     cfg->auto_brightness_enabled = cfg->auto_brightness_enabled ? true : false;
@@ -399,6 +405,9 @@ esp_err_t app_config_tuning_load(app_tuning_config_t *out)
     if (nvs_get_u8(h, "wl_poll", &u8) == ESP_OK) out->wled_poll_s = u8;
     if (nvs_get_u8(h, "wl_stale", &u8) == ESP_OK) out->wled_stale_s = u8;
     if (nvs_get_u8(h, "wl_hue_hz", &u8) == ESP_OK) out->wled_hue_update_hz = u8;
+    if (nvs_get_u8(h, "pwr_ps_en", &u8) == ESP_OK) out->power_preset_mode_enabled = u8 != 0;
+    if (nvs_get_u16(h, "pwr_ps_on", &u16) == ESP_OK) out->power_on_preset_id = u16;
+    if (nvs_get_u16(h, "pwr_ps_off", &u16) == ESP_OK) out->power_off_preset_id = u16;
     if (nvs_get_u8(h, "lt_safe_on", &u8) == ESP_OK) out->light_safety_auto_off_enabled = u8 != 0;
     if (nvs_get_u8(h, "lt_safe_hr", &u8) == ESP_OK) out->light_safety_auto_off_hours = u8;
     if (nvs_get_u8(h, "bl_auto", &u8) == ESP_OK) out->auto_brightness_enabled = u8 != 0;
@@ -474,6 +483,9 @@ esp_err_t app_config_tuning_save(const app_tuning_config_t *cfg)
     if (err == ESP_OK) err = nvs_set_u8(h, "wl_poll", clean.wled_poll_s);
     if (err == ESP_OK) err = nvs_set_u8(h, "wl_stale", clean.wled_stale_s);
     if (err == ESP_OK) err = nvs_set_u8(h, "wl_hue_hz", clean.wled_hue_update_hz);
+    if (err == ESP_OK) err = nvs_set_u8(h, "pwr_ps_en", clean.power_preset_mode_enabled ? 1 : 0);
+    if (err == ESP_OK) err = nvs_set_u16(h, "pwr_ps_on", clean.power_on_preset_id);
+    if (err == ESP_OK) err = nvs_set_u16(h, "pwr_ps_off", clean.power_off_preset_id);
     if (err == ESP_OK) err = nvs_set_u8(h, "lt_safe_on", clean.light_safety_auto_off_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u8(h, "lt_safe_hr", clean.light_safety_auto_off_hours);
     if (err == ESP_OK) err = nvs_set_u8(h, "bl_auto", clean.auto_brightness_enabled ? 1 : 0);

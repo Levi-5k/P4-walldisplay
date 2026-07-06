@@ -51,6 +51,9 @@ typedef struct {
     uint8_t wled_poll_s;
     uint8_t wled_stale_s;
     uint8_t wled_hue_update_hz;
+    bool power_preset_mode_enabled;
+    uint16_t power_on_preset_id;
+    uint16_t power_off_preset_id;
     bool light_safety_auto_off_enabled;
     uint8_t light_safety_auto_off_hours;
     bool auto_brightness_enabled;

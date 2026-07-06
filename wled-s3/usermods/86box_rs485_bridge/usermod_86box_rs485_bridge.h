@@ -588,28 +588,8 @@ private:
     presetCacheLoaded = true;
   }
 
-  static void copyFirstSegment(JsonObject targetState, JsonObject sourceState)
+  static void copySegmentColors(JsonObject targetSegment, JsonObject sourceSegment)
   {
-    JsonArray sourceSegments = sourceState[F("seg")].as<JsonArray>();
-    if (sourceSegments.isNull() || sourceSegments.size() == 0) return;
-
-    JsonObject sourceSegment = sourceSegments[0].as<JsonObject>();
-    if (sourceSegment.isNull()) return;
-
-    JsonArray targetSegments = targetState.createNestedArray(F("seg"));
-    JsonObject targetSegment = targetSegments.createNestedObject();
-    copyJsonValue(targetSegment, sourceSegment, "fx");
-    copyJsonValue(targetSegment, sourceSegment, "pal");
-    copyJsonValue(targetSegment, sourceSegment, "sx");
-    copyJsonValue(targetSegment, sourceSegment, "ix");
-    copyJsonValue(targetSegment, sourceSegment, "c1");
-    copyJsonValue(targetSegment, sourceSegment, "c2");
-    copyJsonValue(targetSegment, sourceSegment, "c3");
-    copyJsonValue(targetSegment, sourceSegment, "o1");
-    copyJsonValue(targetSegment, sourceSegment, "o2");
-    copyJsonValue(targetSegment, sourceSegment, "o3");
-    copyJsonValue(targetSegment, sourceSegment, "cct");
-
     JsonArray sourceColors = sourceSegment[F("col")].as<JsonArray>();
     if (sourceColors.isNull()) return;
 
@@ -626,6 +606,59 @@ private:
     }
   }
 
+  static void copySegment(JsonObject targetSegment, JsonObject sourceSegment)
+  {
+    copyJsonValue(targetSegment, sourceSegment, "id");
+    copyJsonValue(targetSegment, sourceSegment, "n");
+    copyJsonValue(targetSegment, sourceSegment, "start");
+    copyJsonValue(targetSegment, sourceSegment, "stop");
+    copyJsonValue(targetSegment, sourceSegment, "startY");
+    copyJsonValue(targetSegment, sourceSegment, "stopY");
+    copyJsonValue(targetSegment, sourceSegment, "len");
+    copyJsonValue(targetSegment, sourceSegment, "grp");
+    copyJsonValue(targetSegment, sourceSegment, "spc");
+    copyJsonValue(targetSegment, sourceSegment, "of");
+    copyJsonValue(targetSegment, sourceSegment, "on");
+    copyJsonValue(targetSegment, sourceSegment, "frz");
+    copyJsonValue(targetSegment, sourceSegment, "bri");
+    copyJsonValue(targetSegment, sourceSegment, "cct");
+    copyJsonValue(targetSegment, sourceSegment, "set");
+    copyJsonValue(targetSegment, sourceSegment, "fx");
+    copyJsonValue(targetSegment, sourceSegment, "pal");
+    copyJsonValue(targetSegment, sourceSegment, "sx");
+    copyJsonValue(targetSegment, sourceSegment, "ix");
+    copyJsonValue(targetSegment, sourceSegment, "c1");
+    copyJsonValue(targetSegment, sourceSegment, "c2");
+    copyJsonValue(targetSegment, sourceSegment, "c3");
+    copyJsonValue(targetSegment, sourceSegment, "sel");
+    copyJsonValue(targetSegment, sourceSegment, "rev");
+    copyJsonValue(targetSegment, sourceSegment, "mi");
+    copyJsonValue(targetSegment, sourceSegment, "rY");
+    copyJsonValue(targetSegment, sourceSegment, "mY");
+    copyJsonValue(targetSegment, sourceSegment, "tp");
+    copyJsonValue(targetSegment, sourceSegment, "o1");
+    copyJsonValue(targetSegment, sourceSegment, "o2");
+    copyJsonValue(targetSegment, sourceSegment, "o3");
+    copyJsonValue(targetSegment, sourceSegment, "si");
+    copyJsonValue(targetSegment, sourceSegment, "m12");
+    copyJsonValue(targetSegment, sourceSegment, "bm");
+    copySegmentColors(targetSegment, sourceSegment);
+  }
+
+  static void copySegments(JsonObject targetState, JsonObject sourceState)
+  {
+    JsonArray sourceSegments = sourceState[F("seg")].as<JsonArray>();
+    if (sourceSegments.isNull() || sourceSegments.size() == 0) return;
+
+    JsonArray targetSegments = targetState.createNestedArray(F("seg"));
+    for (uint8_t index = 0; index < sourceSegments.size(); index++) {
+      JsonObject sourceSegment = sourceSegments[index].as<JsonObject>();
+      if (sourceSegment.isNull()) continue;
+      JsonObject targetSegment = targetSegments.createNestedObject();
+      copySegment(targetSegment, sourceSegment);
+    }
+  }
+
   void buildCompactSnapshot(JsonDocument &target, JsonObject sourceState, JsonObject sourceInfo)
   {
     JsonObject targetState = target.createNestedObject(F("state"));
@@ -634,7 +667,8 @@ private:
     copyJsonValue(targetState, sourceState, "transition");
     copyJsonValue(targetState, sourceState, "ps");
     copyJsonValue(targetState, sourceState, "pl");
-    copyFirstSegment(targetState, sourceState);
+    copyJsonValue(targetState, sourceState, "mainseg");
+    copySegments(targetState, sourceState);
 
     JsonObject targetInfo = target.createNestedObject(F("info"));
     copyJsonValue(targetInfo, sourceInfo, "ver");

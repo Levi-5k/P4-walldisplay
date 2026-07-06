@@ -241,6 +241,7 @@ static bool hold_active_until(uint32_t until_ms)
 
 static void preset_sync_labels_refresh(void);
 static void preset_panels_rebuild(bool force);
+static void segment_panels_rebuild(bool force);
 
 static bool timer_page_hidden(lv_timer_t *timer, lv_obj_t *page)
 {
@@ -350,9 +351,14 @@ static uint16_t s_preset_delete_pending_id;
 static char s_preset_delete_pending_name[WLED_PRESET_NAME_MAX];
 static uint32_t s_preset_render_hash;
 static int16_t s_preset_edit_id = 1;
+static lv_obj_t *s_segment_list;
+static lv_obj_t *s_segment_name_ta;
+static uint8_t s_segment_expanded_id = 0xFF;
+static uint32_t s_segment_render_hash;
 static lv_obj_t *s_lights_root;
 static lv_obj_t *s_lights_home_page;
 static lv_obj_t *s_lights_effects_page;
+static lv_obj_t *s_lights_segments_page;
 static lv_obj_t *s_lights_presets_page;
 static lv_obj_t *s_lights_conn_badge;   /* connection pill in the hero header */
 static lv_obj_t *s_lights_conn_label;
@@ -764,6 +770,7 @@ static void lights_apply_wled_state(const wled_state_t *ws)
     for (size_t i = 0; i < WLED_EFFECT_OPTION_COUNT; i++) {
         switch_set_checked_if_changed(s_effect_option_switches[i], effect_option_value(ws, i));
     }
+    segment_panels_rebuild(false);
     preset_sync_labels_refresh();
     s_ui_updating = false;
 }
@@ -849,6 +856,7 @@ static void lights_show_panel(lv_obj_t *panel)
     lv_obj_t *panels[] = {
         s_lights_home_page,
         s_lights_effects_page,
+        s_lights_segments_page,
         s_lights_presets_page,
     };
     for (size_t i = 0; i < sizeof(panels) / sizeof(panels[0]); i++) {
@@ -859,8 +867,8 @@ static void lights_show_panel(lv_obj_t *panel)
     if (s_lights_root) lv_obj_scroll_to_y(s_lights_root, 0, LV_ANIM_OFF);
 }
 
-/* WLED-style tab bar: Color / Effects / Presets segmented control. */
-#define LIGHTS_TAB_COUNT 3
+/* WLED-style tab bar: Color / Effects / Segments / Presets segmented control. */
+#define LIGHTS_TAB_COUNT 4
 static lv_obj_t *s_lights_tab_btn[LIGHTS_TAB_COUNT];
 static lv_obj_t *s_lights_tab_lbl[LIGHTS_TAB_COUNT];
 static lv_obj_t *s_lights_tab_page[LIGHTS_TAB_COUNT];
@@ -901,7 +909,7 @@ static lv_obj_t *lights_tabbar_create(lv_obj_t *parent)
     lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
 
-    static const char *names[LIGHTS_TAB_COUNT] = {"Color", "Effects", "Presets"};
+    static const char *names[LIGHTS_TAB_COUNT] = {"Color", "Effects", "Segments", "Presets"};
     for (int i = 0; i < LIGHTS_TAB_COUNT; i++) {
         lv_obj_t *btn = lv_button_create(bar);
         lv_obj_set_flex_grow(btn, 1);
@@ -1948,6 +1956,706 @@ static void preset_panels_rebuild(bool force)
     }
 }
 
+#define SEGMENT_EXPANDED_NONE 0xFFu
+#define SEGMENT_VALUE_CTX_MAX (WLED_SEGMENT_LIST_MAX * 8)
+
+typedef enum {
+    SEGMENT_VALUE_BRI,
+    SEGMENT_VALUE_START,
+    SEGMENT_VALUE_STOP,
+    SEGMENT_VALUE_START_Y,
+    SEGMENT_VALUE_STOP_Y,
+    SEGMENT_VALUE_GROUP,
+    SEGMENT_VALUE_SPACING,
+    SEGMENT_VALUE_OFFSET,
+} segment_value_field_t;
+
+typedef enum {
+    SEGMENT_BOOL_ON,
+    SEGMENT_BOOL_SELECTED,
+    SEGMENT_BOOL_REVERSE,
+    SEGMENT_BOOL_MIRROR,
+    SEGMENT_BOOL_REVERSE_Y,
+    SEGMENT_BOOL_MIRROR_Y,
+    SEGMENT_BOOL_TRANSPOSE,
+    SEGMENT_BOOL_FREEZE,
+} segment_bool_field_t;
+
+typedef enum {
+    SEGMENT_DROPDOWN_SET,
+    SEGMENT_DROPDOWN_BLEND,
+    SEGMENT_DROPDOWN_SOUND_SIM,
+    SEGMENT_DROPDOWN_MAP_1D_2D,
+} segment_dropdown_field_t;
+
+typedef struct {
+    uint8_t id;
+    segment_value_field_t field;
+    lv_obj_t *value_label;
+    uint32_t last_send_ms;
+} segment_value_ctx_t;
+
+static segment_value_ctx_t s_segment_value_ctx[SEGMENT_VALUE_CTX_MAX];
+static uint16_t s_segment_value_ctx_count;
+
+static void *segment_pack(uint8_t id, uint8_t field)
+{
+    return (void *)(uintptr_t)(((uint16_t)id << 8) | field);
+}
+
+static uint8_t segment_pack_id(const void *data)
+{
+    return (uint8_t)(((uintptr_t)data >> 8) & 0xFFu);
+}
+
+static uint8_t segment_pack_field(const void *data)
+{
+    return (uint8_t)((uintptr_t)data & 0xFFu);
+}
+
+static uint32_t segment_hash_mix(uint32_t hash, uint32_t value)
+{
+    return (hash ^ value) * 16777619u;
+}
+
+static uint32_t segment_hash_string(uint32_t hash, const char *text)
+{
+    for (const char *p = text; p && *p; p++) hash = segment_hash_mix(hash, (uint8_t)*p);
+    return hash;
+}
+
+static const wled_segment_t *segment_item_for_id(const wled_state_t *ws, uint8_t id)
+{
+    if (!ws || !ws->segments) return NULL;
+    for (uint8_t i = 0; i < ws->segment_count; i++) {
+        if (ws->segments[i].id == id) return &ws->segments[i];
+    }
+    return NULL;
+}
+
+static uint32_t segment_list_hash(const wled_state_t *ws)
+{
+    uint32_t hash = 2166136261u;
+    if (!ws) return hash;
+    hash = segment_hash_mix(hash, s_segment_expanded_id);
+    hash = segment_hash_mix(hash, ws->mainseg);
+    hash = segment_hash_mix(hash, ws->led_count);
+    hash = segment_hash_mix(hash, ws->segment_count);
+    hash = segment_hash_mix(hash, ws->segments_truncated ? 1u : 0u);
+    for (uint8_t i = 0; ws->segments && i < ws->segment_count; i++) {
+        const wled_segment_t *seg = &ws->segments[i];
+        hash = segment_hash_mix(hash, seg->id);
+        hash = segment_hash_string(hash, seg->name);
+        hash = segment_hash_mix(hash, seg->on ? 1u : 0u);
+        hash = segment_hash_mix(hash, seg->selected ? 1u : 0u);
+        hash = segment_hash_mix(hash, seg->reverse ? 1u : 0u);
+        hash = segment_hash_mix(hash, seg->mirror ? 1u : 0u);
+        hash = segment_hash_mix(hash, seg->reverse_y ? 1u : 0u);
+        hash = segment_hash_mix(hash, seg->mirror_y ? 1u : 0u);
+        hash = segment_hash_mix(hash, seg->transpose ? 1u : 0u);
+        hash = segment_hash_mix(hash, seg->freeze ? 1u : 0u);
+        hash = segment_hash_mix(hash, seg->start);
+        hash = segment_hash_mix(hash, seg->stop);
+        hash = segment_hash_mix(hash, seg->start_y);
+        hash = segment_hash_mix(hash, seg->stop_y);
+        hash = segment_hash_mix(hash, seg->group);
+        hash = segment_hash_mix(hash, seg->spacing);
+        hash = segment_hash_mix(hash, seg->offset);
+        hash = segment_hash_mix(hash, seg->brightness);
+        hash = segment_hash_mix(hash, seg->set);
+        hash = segment_hash_mix(hash, seg->sound_sim);
+        hash = segment_hash_mix(hash, seg->map_1d_2d);
+        hash = segment_hash_mix(hash, seg->blend_mode);
+    }
+    return hash;
+}
+
+static void segment_send(const char *json, const char *toast)
+{
+    if (!json || !json[0]) return;
+    esp_err_t err = cmd_tx_send_json(json);
+    if (err == ESP_OK) {
+        if (toast && toast[0]) toast_show(toast);
+    } else {
+        toast_show(esp_err_to_name(err));
+    }
+}
+
+static const char *segment_bool_key(segment_bool_field_t field)
+{
+    switch (field) {
+    case SEGMENT_BOOL_ON: return "on";
+    case SEGMENT_BOOL_SELECTED: return "sel";
+    case SEGMENT_BOOL_REVERSE: return "rev";
+    case SEGMENT_BOOL_MIRROR: return "mi";
+    case SEGMENT_BOOL_REVERSE_Y: return "rY";
+    case SEGMENT_BOOL_MIRROR_Y: return "mY";
+    case SEGMENT_BOOL_TRANSPOSE: return "tp";
+    case SEGMENT_BOOL_FREEZE: return "frz";
+    default: return "sel";
+    }
+}
+
+static const char *segment_value_key(segment_value_field_t field)
+{
+    switch (field) {
+    case SEGMENT_VALUE_BRI: return "bri";
+    case SEGMENT_VALUE_GROUP: return "grp";
+    case SEGMENT_VALUE_SPACING: return "spc";
+    case SEGMENT_VALUE_OFFSET: return "of";
+    default: return "start";
+    }
+}
+
+static const char *segment_dropdown_key(segment_dropdown_field_t field)
+{
+    switch (field) {
+    case SEGMENT_DROPDOWN_SET: return "set";
+    case SEGMENT_DROPDOWN_BLEND: return "bm";
+    case SEGMENT_DROPDOWN_SOUND_SIM: return "si";
+    case SEGMENT_DROPDOWN_MAP_1D_2D: return "m12";
+    default: return "set";
+    }
+}
+
+static void segment_value_label_set(lv_obj_t *label, int value)
+{
+    char text[16];
+    snprintf(text, sizeof(text), "%d", value);
+    label_set_text_if_changed(label, text);
+}
+
+static segment_value_ctx_t *segment_value_ctx_alloc(uint8_t id, segment_value_field_t field, lv_obj_t *value_label)
+{
+    if (s_segment_value_ctx_count >= SEGMENT_VALUE_CTX_MAX) return NULL;
+    segment_value_ctx_t *ctx = &s_segment_value_ctx[s_segment_value_ctx_count++];
+    ctx->id = id;
+    ctx->field = field;
+    ctx->value_label = value_label;
+    ctx->last_send_ms = 0;
+    return ctx;
+}
+
+static void segment_value_changed(lv_event_t *e)
+{
+    if (s_ui_updating) return;
+    segment_value_ctx_t *ctx = (segment_value_ctx_t *)lv_event_get_user_data(e);
+    if (!ctx) return;
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_VALUE_CHANGED && !rate_limit_ms(&ctx->last_send_ms, 140)) return;
+
+    int value = lv_slider_get_value(lv_event_get_target(e));
+    segment_value_label_set(ctx->value_label, value);
+
+    wled_state_t ws;
+    wled_state_get(&ws);
+    const wled_segment_t *seg = segment_item_for_id(&ws, ctx->id);
+    char json[128];
+    switch (ctx->field) {
+    case SEGMENT_VALUE_START:
+    {
+        uint16_t stop = seg ? seg->stop : (uint16_t)(value + 1);
+        if (stop <= (uint16_t)value) stop = (uint16_t)value + 1;
+        snprintf(json, sizeof(json), "{\"seg\":{\"id\":%u,\"start\":%d,\"stop\":%u}}", ctx->id, value, (unsigned)stop);
+        break;
+    }
+    case SEGMENT_VALUE_STOP:
+    {
+        uint16_t start = seg ? seg->start : 0;
+        if (value <= (int)start) value = (int)start + 1;
+        snprintf(json, sizeof(json), "{\"seg\":{\"id\":%u,\"start\":%u,\"stop\":%d}}", ctx->id, (unsigned)start, value);
+        break;
+    }
+    case SEGMENT_VALUE_START_Y:
+    {
+        uint16_t stop_y = seg ? seg->stop_y : (uint16_t)(value + 1);
+        if (stop_y <= (uint16_t)value) stop_y = (uint16_t)value + 1;
+        snprintf(json, sizeof(json), "{\"seg\":{\"id\":%u,\"startY\":%d,\"stopY\":%u}}", ctx->id, value, (unsigned)stop_y);
+        break;
+    }
+    case SEGMENT_VALUE_STOP_Y:
+    {
+        uint16_t start_y = seg ? seg->start_y : 0;
+        if (value <= (int)start_y) value = (int)start_y + 1;
+        snprintf(json, sizeof(json), "{\"seg\":{\"id\":%u,\"startY\":%u,\"stopY\":%d}}", ctx->id, (unsigned)start_y, value);
+        break;
+    }
+    default:
+        snprintf(json, sizeof(json), "{\"seg\":{\"id\":%u,\"%s\":%d}}", ctx->id, segment_value_key(ctx->field), value);
+        break;
+    }
+    segment_send(json, NULL);
+}
+
+static void segment_switch_changed(lv_event_t *e)
+{
+    if (s_ui_updating) return;
+    void *data = lv_event_get_user_data(e);
+    uint8_t id = segment_pack_id(data);
+    segment_bool_field_t field = (segment_bool_field_t)segment_pack_field(data);
+    bool checked = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    char json[96];
+    snprintf(json, sizeof(json), "{\"seg\":{\"id\":%u,\"%s\":%s}}", id, segment_bool_key(field), checked ? "true" : "false");
+    segment_send(json, NULL);
+}
+
+static void segment_dropdown_changed(lv_event_t *e)
+{
+    if (s_ui_updating) return;
+    void *data = lv_event_get_user_data(e);
+    uint8_t id = segment_pack_id(data);
+    segment_dropdown_field_t field = (segment_dropdown_field_t)segment_pack_field(data);
+    uint16_t value = lv_dropdown_get_selected(lv_event_get_target(e));
+    char json[96];
+    snprintf(json, sizeof(json), "{\"seg\":{\"id\":%u,\"%s\":%u}}", id, segment_dropdown_key(field), (unsigned)value);
+    segment_send(json, NULL);
+}
+
+static void segment_expand_clicked(lv_event_t *e)
+{
+    uint8_t id = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+    s_segment_expanded_id = (s_segment_expanded_id == id) ? SEGMENT_EXPANDED_NONE : id;
+    segment_panels_rebuild(true);
+}
+
+static void segment_main_clicked(lv_event_t *e)
+{
+    uint8_t id = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+    char json[96];
+    snprintf(json, sizeof(json), "{\"mainseg\":%u,\"seg\":{\"id\":%u,\"sel\":true}}", id, id);
+    segment_send(json, "Main segment set");
+}
+
+static uint8_t segment_next_id(const wled_state_t *ws)
+{
+    uint8_t next = 0;
+    if (ws && ws->segments) {
+        for (uint8_t i = 0; i < ws->segment_count; i++) {
+            if (ws->segments[i].id >= next) next = ws->segments[i].id + 1;
+        }
+    }
+    return next;
+}
+
+static void segment_add_clicked(lv_event_t *e)
+{
+    (void)e;
+    wled_state_t ws;
+    wled_state_get(&ws);
+    if (ws.segment_count >= WLED_SEGMENT_LIST_MAX) {
+        toast_show("Segment list full");
+        return;
+    }
+
+    uint8_t id = segment_next_id(&ws);
+    uint16_t led_count = ws.led_count ? ws.led_count : 300;
+    uint16_t start = 0;
+    for (uint8_t i = 0; ws.segments && i < ws.segment_count; i++) {
+        if (ws.segments[i].stop > start && ws.segments[i].stop <= led_count) start = ws.segments[i].stop;
+    }
+    if (start >= led_count) start = 0;
+    uint16_t stop = led_count;
+    if (stop <= start) stop = start + 1;
+
+    s_segment_expanded_id = id;
+    char json[160];
+    snprintf(json, sizeof(json), "{\"seg\":{\"id\":%u,\"n\":\"Segment %u\",\"start\":%u,\"stop\":%u,\"sel\":true}}",
+             id, id, (unsigned)start, (unsigned)stop);
+    segment_send(json, "Segment added");
+    segment_panels_rebuild(true);
+}
+
+static void segment_delete_clicked(lv_event_t *e)
+{
+    uint8_t id = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+    wled_state_t ws;
+    wled_state_get(&ws);
+    if (ws.segment_count < 2) {
+        toast_show("Need multiple segments");
+        return;
+    }
+    if (s_segment_expanded_id == id) s_segment_expanded_id = SEGMENT_EXPANDED_NONE;
+    char json[48];
+    snprintf(json, sizeof(json), "{\"seg\":{\"id\":%u,\"stop\":0}}", id);
+    segment_send(json, "Segment deleted");
+    segment_panels_rebuild(true);
+}
+
+static void segment_update_clicked(lv_event_t *e)
+{
+    uint8_t id = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+    wled_state_t ws;
+    wled_state_get(&ws);
+    const wled_segment_t *seg = segment_item_for_id(&ws, id);
+    if (!seg) return;
+
+    char escaped[WLED_SEGMENT_NAME_MAX * 2];
+    const char *name = s_segment_name_ta ? lv_textarea_get_text(s_segment_name_ta) : seg->name;
+    preset_json_escape(name && name[0] ? name : seg->name, escaped, sizeof(escaped));
+
+    char json[512];
+    snprintf(json, sizeof(json),
+             "{\"seg\":{\"id\":%u,\"n\":\"%s\",\"start\":%u,\"stop\":%u,\"startY\":%u,\"stopY\":%u,"
+             "\"grp\":%u,\"spc\":%u,\"of\":%u,\"on\":%s,\"bri\":%u,\"sel\":%s,\"rev\":%s,\"mi\":%s,"
+             "\"rY\":%s,\"mY\":%s,\"tp\":%s,\"frz\":%s,\"set\":%u,\"bm\":%u,\"si\":%u,\"m12\":%u}}",
+             id, escaped, (unsigned)seg->start, (unsigned)seg->stop, (unsigned)seg->start_y, (unsigned)seg->stop_y,
+             (unsigned)seg->group, (unsigned)seg->spacing, (unsigned)seg->offset,
+             seg->on ? "true" : "false", (unsigned)seg->brightness, seg->selected ? "true" : "false",
+             seg->reverse ? "true" : "false", seg->mirror ? "true" : "false", seg->reverse_y ? "true" : "false",
+             seg->mirror_y ? "true" : "false", seg->transpose ? "true" : "false", seg->freeze ? "true" : "false",
+             (unsigned)seg->set, (unsigned)seg->blend_mode, (unsigned)seg->sound_sim, (unsigned)seg->map_1d_2d);
+    segment_send(json, "Segment updated");
+}
+
+static void segment_repeat_clicked(lv_event_t *e)
+{
+    uint8_t id = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+    wled_state_t ws;
+    wled_state_get(&ws);
+    const wled_segment_t *seg = segment_item_for_id(&ws, id);
+    if (!seg) return;
+
+    char escaped[WLED_SEGMENT_NAME_MAX * 2];
+    preset_json_escape(seg->name, escaped, sizeof(escaped));
+    char json[384];
+    snprintf(json, sizeof(json),
+             "{\"seg\":{\"id\":%u,\"n\":\"%s\",\"start\":%u,\"stop\":%u,\"grp\":%u,\"spc\":%u,"
+             "\"of\":%u,\"rev\":%s,\"mi\":%s,\"on\":%s,\"bri\":%u,\"sel\":%s,\"rpt\":true}}",
+             id, escaped, (unsigned)seg->start, (unsigned)seg->stop, (unsigned)seg->group, (unsigned)seg->spacing,
+             (unsigned)seg->offset, seg->reverse ? "true" : "false", seg->mirror ? "true" : "false",
+             seg->on ? "true" : "false", (unsigned)seg->brightness, seg->selected ? "true" : "false");
+    segment_send(json, "Segment repeated");
+}
+
+static lv_obj_t *segment_action_button_create(lv_obj_t *parent, const char *label, lv_color_t bg,
+                                              uint8_t id, lv_event_cb_t cb)
+{
+    lv_obj_t *btn = lv_button_create(parent);
+    lv_obj_set_height(btn, 44);
+    lv_obj_set_flex_grow(btn, 1);
+    lv_obj_set_style_radius(btn, 12, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, bg, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
+    if (cb) lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, (void *)(uintptr_t)id);
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, label);
+    lv_obj_set_style_text_font(lbl, THEME_FONT_SMALL, LV_PART_MAIN);
+    lv_obj_set_style_text_color(lbl, THEME_TEXT_PRIMARY, LV_PART_MAIN);
+    lv_obj_center(lbl);
+    return btn;
+}
+
+static lv_obj_t *segment_switch_row_create(lv_obj_t *parent, const char *label, bool checked,
+                                           uint8_t id, segment_bool_field_t field)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *lb = lv_label_create(row);
+    lv_label_set_text(lb, label);
+    lv_obj_set_style_text_color(lb, THEME_TEXT_SECONDARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(lb, THEME_FONT_SMALL, LV_PART_MAIN);
+
+    lv_obj_t *sw = lv_switch_create(row);
+    lv_obj_set_size(sw, 52, 28);
+    switch_set_checked_if_changed(sw, checked);
+    lv_obj_set_style_bg_color(sw, THEME_SURFACE_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(sw, theme_primary_color(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(sw, segment_switch_changed, LV_EVENT_VALUE_CHANGED, segment_pack(id, (uint8_t)field));
+    return sw;
+}
+
+static lv_obj_t *segment_value_row_create(lv_obj_t *parent, const char *label,
+                                          int min_value, int max_value, int value,
+                                          uint8_t id, segment_value_field_t field)
+{
+    if (max_value < min_value) max_value = min_value;
+    if (value < min_value) value = min_value;
+    if (value > max_value) value = max_value;
+
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), 54);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 10, LV_PART_MAIN);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *lb = lv_label_create(row);
+    lv_label_set_text(lb, label);
+    lv_obj_set_width(lb, 132);
+    lv_label_set_long_mode(lb, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(lb, THEME_TEXT_SECONDARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(lb, THEME_FONT_SMALL, LV_PART_MAIN);
+
+    lv_obj_t *slider = lv_slider_create(row);
+    lv_obj_set_flex_grow(slider, 1);
+    lv_obj_set_height(slider, 24);
+    lv_slider_set_range(slider, min_value, max_value);
+    lv_slider_set_value(slider, value, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(slider, THEME_SURFACE_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(slider, theme_primary_color(), LV_PART_INDICATOR);
+    lv_obj_set_style_radius(slider, 10, LV_PART_MAIN);
+    lv_obj_set_style_radius(slider, 10, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(slider, lv_color_white(), LV_PART_KNOB);
+    lv_obj_set_style_pad_all(slider, 2, LV_PART_KNOB);
+
+    lv_obj_t *value_label = lv_label_create(row);
+    lv_obj_set_width(value_label, 48);
+    lv_obj_set_style_text_align(value_label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(value_label, THEME_TEXT_PRIMARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(value_label, THEME_FONT_SMALL, LV_PART_MAIN);
+    segment_value_label_set(value_label, value);
+
+    segment_value_ctx_t *ctx = segment_value_ctx_alloc(id, field, value_label);
+    if (ctx) {
+        lv_obj_add_event_cb(slider, segment_value_changed, LV_EVENT_VALUE_CHANGED, ctx);
+        lv_obj_add_event_cb(slider, segment_value_changed, LV_EVENT_RELEASED, ctx);
+    }
+    return slider;
+}
+
+static lv_obj_t *segment_dropdown_row_create(lv_obj_t *parent, const char *label, const char *options,
+                                             uint8_t selected, uint8_t id, segment_dropdown_field_t field)
+{
+    lv_obj_t *dd = preset_dropdown_row_create(parent, label, options);
+    lv_dropdown_set_selected(dd, selected);
+    lv_obj_add_event_cb(dd, segment_dropdown_changed, LV_EVENT_VALUE_CHANGED, segment_pack(id, (uint8_t)field));
+    return dd;
+}
+
+static void segment_expanded_body_create(lv_obj_t *card, const wled_segment_t *seg, const wled_state_t *ws)
+{
+    if (!card || !seg) return;
+
+    preset_panel_section_label(card, "NAME");
+    s_segment_name_ta = lv_textarea_create(card);
+    lv_obj_set_size(s_segment_name_ta, LV_PCT(100), 48);
+    lv_textarea_set_one_line(s_segment_name_ta, true);
+    lv_textarea_set_max_length(s_segment_name_ta, WLED_SEGMENT_NAME_MAX - 1);
+    lv_textarea_set_text(s_segment_name_ta, seg->name[0] ? seg->name : "Segment");
+    lv_obj_set_style_bg_color(s_segment_name_ta, THEME_SURFACE_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_segment_name_ta, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_segment_name_ta, THEME_BORDER_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_segment_name_ta, 1, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_segment_name_ta, 14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_segment_name_ta, THEME_TEXT_PRIMARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_segment_name_ta, THEME_FONT_BODY, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(s_segment_name_ta, 14, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(s_segment_name_ta, 10, LV_PART_MAIN);
+    lv_obj_add_flag(s_segment_name_ta, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_CLICK_FOCUSABLE | LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+    lv_obj_add_event_cb(s_segment_name_ta, preset_command_ta_event, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(s_segment_name_ta, preset_command_ta_event, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(s_segment_name_ta, preset_command_ta_event, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(s_segment_name_ta, preset_command_ta_event, LV_EVENT_READY, NULL);
+    lv_obj_add_event_cb(s_segment_name_ta, preset_command_ta_event, LV_EVENT_CANCEL, NULL);
+
+    lv_obj_t *actions = lv_obj_create(card);
+    lv_obj_remove_style_all(actions);
+    lv_obj_set_size(actions, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(actions, 8, LV_PART_MAIN);
+    lv_obj_clear_flag(actions, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    segment_action_button_create(actions, "Main", lv_color_hex(0x2A3E58), seg->id, segment_main_clicked);
+    segment_action_button_create(actions, "Update", theme_primary_color(), seg->id, segment_update_clicked);
+    segment_action_button_create(actions, "Repeat", lv_color_hex(0x2A5E72), seg->id, segment_repeat_clicked);
+    segment_action_button_create(actions, "Delete", THEME_ERROR_COLOR, seg->id, segment_delete_clicked);
+
+    preset_panel_section_label(card, "POWER");
+    segment_value_row_create(card, "Opacity", 1, 255, seg->brightness, seg->id, SEGMENT_VALUE_BRI);
+
+    preset_panel_section_label(card, "BOUNDS");
+    uint16_t led_count = ws && ws->led_count ? ws->led_count : (seg->stop > 0 ? seg->stop : 300);
+    segment_value_row_create(card, "Start LED", 0, led_count > 1 ? led_count - 1 : 0, seg->start, seg->id, SEGMENT_VALUE_START);
+    segment_value_row_create(card, "Stop LED", 1, led_count ? led_count : 1, seg->stop ? seg->stop : led_count, seg->id, SEGMENT_VALUE_STOP);
+    segment_value_row_create(card, "Start Y", 0, 255, seg->start_y, seg->id, SEGMENT_VALUE_START_Y);
+    segment_value_row_create(card, "Stop Y", 1, 256, seg->stop_y ? seg->stop_y : 1, seg->id, SEGMENT_VALUE_STOP_Y);
+    segment_value_row_create(card, "Grouping", 1, 255, seg->group ? seg->group : 1, seg->id, SEGMENT_VALUE_GROUP);
+    segment_value_row_create(card, "Spacing", 0, 255, seg->spacing, seg->id, SEGMENT_VALUE_SPACING);
+    uint16_t offset_max = seg->len > 1 ? seg->len - 1 : 255;
+    segment_value_row_create(card, "Offset", 0, offset_max, seg->offset, seg->id, SEGMENT_VALUE_OFFSET);
+
+    preset_panel_section_label(card, "FLAGS");
+    lv_obj_t *flags = lv_obj_create(card);
+    lv_obj_remove_style_all(flags);
+    lv_obj_set_size(flags, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(flags, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(flags, 8, LV_PART_MAIN);
+    lv_obj_clear_flag(flags, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    segment_switch_row_create(flags, "Selected", seg->selected, seg->id, SEGMENT_BOOL_SELECTED);
+    segment_switch_row_create(flags, "Reverse direction", seg->reverse, seg->id, SEGMENT_BOOL_REVERSE);
+    segment_switch_row_create(flags, "Mirror effect", seg->mirror, seg->id, SEGMENT_BOOL_MIRROR);
+    segment_switch_row_create(flags, "Reverse Y", seg->reverse_y, seg->id, SEGMENT_BOOL_REVERSE_Y);
+    segment_switch_row_create(flags, "Mirror Y", seg->mirror_y, seg->id, SEGMENT_BOOL_MIRROR_Y);
+    segment_switch_row_create(flags, "Transpose", seg->transpose, seg->id, SEGMENT_BOOL_TRANSPOSE);
+    segment_switch_row_create(flags, "Freeze", seg->freeze, seg->id, SEGMENT_BOOL_FREEZE);
+
+    preset_panel_section_label(card, "ADVANCED");
+    segment_dropdown_row_create(card, "Set group", "Default\nGroup 1\nGroup 2\nGroup 3",
+                                seg->set <= 3 ? seg->set : 0, seg->id, SEGMENT_DROPDOWN_SET);
+    segment_dropdown_row_create(card, "Blend mode",
+                                "Top / Default\nBottom / None\nAdd\nSubtract\nDifference\nAverage\nMultiply\nDivide\nLighten\nDarken\nScreen\nOverlay\nHard Light\nSoft Light\nDodge\nBurn\nStencil",
+                                seg->blend_mode <= 16 ? seg->blend_mode : 0, seg->id, SEGMENT_DROPDOWN_BLEND);
+    segment_dropdown_row_create(card, "1D expand", "Pixels\nBar\nArc\nCorner\nPinwheel",
+                                seg->map_1d_2d <= 4 ? seg->map_1d_2d : 0, seg->id, SEGMENT_DROPDOWN_MAP_1D_2D);
+    segment_dropdown_row_create(card, "Sound sim", "BeatSin\nWeWillRockYou\n10/13\n14/3",
+                                seg->sound_sim <= 3 ? seg->sound_sim : 0, seg->id, SEGMENT_DROPDOWN_SOUND_SIM);
+}
+
+static void segment_panel_create(lv_obj_t *parent, const wled_segment_t *seg, const wled_state_t *ws)
+{
+    if (!parent || !seg) return;
+    bool expanded = s_segment_expanded_id == seg->id;
+    bool main = ws && ws->mainseg == seg->id;
+
+    lv_obj_t *card = lv_obj_create(parent);
+    lv_obj_remove_style_all(card);
+    lv_obj_set_size(card, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(card, expanded ? 16 : 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(card, expanded ? 12 : 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(card, 18, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(card, expanded ? THEME_CARD_COLOR : THEME_SURFACE_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(card, theme_surface_opa(), LV_PART_MAIN);
+    lv_obj_set_style_border_width(card, main ? 2 : 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(card, main ? theme_primary_color() : THEME_BORDER_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(card, 0, LV_PART_MAIN);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *header = lv_button_create(card);
+    lv_obj_remove_style_all(header);
+    lv_obj_set_size(header, LV_PCT(100), 60);
+    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(header, 10, LV_PART_MAIN);
+    lv_obj_set_style_radius(header, 14, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(header, THEME_SURFACE_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(header, theme_surface_opa(), LV_PART_MAIN);
+    lv_obj_add_event_cb(header, segment_expand_clicked, LV_EVENT_CLICKED, (void *)(uintptr_t)seg->id);
+
+    lv_obj_t *select_sw = lv_switch_create(header);
+    lv_obj_set_size(select_sw, 46, 26);
+    switch_set_checked_if_changed(select_sw, seg->selected);
+    lv_obj_set_style_bg_color(select_sw, THEME_SURFACE_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(select_sw, theme_primary_color(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(select_sw, segment_switch_changed, LV_EVENT_VALUE_CHANGED,
+                        segment_pack(seg->id, (uint8_t)SEGMENT_BOOL_SELECTED));
+
+    lv_obj_t *left = lv_obj_create(header);
+    lv_obj_remove_style_all(left);
+    lv_obj_set_flex_grow(left, 1);
+    lv_obj_set_height(left, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(left, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(left, 2, LV_PART_MAIN);
+    lv_obj_clear_flag(left, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_CLICK_FOCUSABLE);
+
+    lv_obj_t *name = lv_label_create(left);
+    lv_label_set_text(name, seg->name[0] ? seg->name : "Segment");
+    lv_obj_set_width(name, 300);
+    lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(name, THEME_TEXT_PRIMARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(name, THEME_FONT_LABEL, LV_PART_MAIN);
+
+    char meta[96];
+    snprintf(meta, sizeof(meta), "ID %u  %u-%u  %u LEDs%s%s%s",
+             (unsigned)seg->id, (unsigned)seg->start, (unsigned)seg->stop,
+             (unsigned)(seg->stop > seg->start ? seg->stop - seg->start : seg->len),
+             main ? "  Main" : "", seg->freeze ? "  Frozen" : "", seg->on ? "" : "  Off");
+    lv_obj_t *sub = lv_label_create(left);
+    lv_label_set_text(sub, meta);
+    lv_obj_set_style_text_color(sub, main ? theme_primary_color() : THEME_TEXT_MUTED, LV_PART_MAIN);
+    lv_obj_set_style_text_font(sub, THEME_FONT_SMALL, LV_PART_MAIN);
+
+    lv_obj_t *power_sw = lv_switch_create(header);
+    lv_obj_set_size(power_sw, 52, 28);
+    switch_set_checked_if_changed(power_sw, seg->on);
+    lv_obj_set_style_bg_color(power_sw, THEME_SURFACE_COLOR, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(power_sw, theme_primary_color(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(power_sw, segment_switch_changed, LV_EVENT_VALUE_CHANGED,
+                        segment_pack(seg->id, (uint8_t)SEGMENT_BOOL_ON));
+
+    lv_obj_t *arrow = lv_label_create(header);
+    lv_label_set_text(arrow, expanded ? LV_SYMBOL_DOWN : LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_color(arrow, THEME_TEXT_SECONDARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(arrow, THEME_FONT_BODY, LV_PART_MAIN);
+
+    if (expanded) segment_expanded_body_create(card, seg, ws);
+}
+
+static lv_obj_t *segment_plus_button_create(lv_obj_t *parent)
+{
+    lv_obj_t *btn = lv_button_create(parent);
+    lv_obj_set_size(btn, 48, 48);
+    lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, theme_primary_color(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
+    lv_obj_add_event_cb(btn, segment_add_clicked, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, LV_SYMBOL_PLUS);
+    lv_obj_set_style_text_color(label, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, THEME_FONT_BODY, LV_PART_MAIN);
+    lv_obj_center(label);
+    return btn;
+}
+
+static void segment_panels_rebuild(bool force)
+{
+    if (!s_segment_list) return;
+
+    wled_state_t ws;
+    wled_state_get(&ws);
+    if (s_segment_expanded_id != SEGMENT_EXPANDED_NONE && !segment_item_for_id(&ws, s_segment_expanded_id)) {
+        s_segment_expanded_id = SEGMENT_EXPANDED_NONE;
+    }
+
+    uint32_t hash = segment_list_hash(&ws);
+    if (!force && hash == s_segment_render_hash) return;
+    s_segment_render_hash = hash;
+
+    s_segment_value_ctx_count = 0;
+    s_segment_name_ta = NULL;
+    preset_command_keyboard_hide();
+    lv_obj_clean(s_segment_list);
+
+    lv_obj_t *top = lv_obj_create(s_segment_list);
+    lv_obj_remove_style_all(top);
+    lv_obj_set_size(top, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(top, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(top, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *title = lv_label_create(top);
+    char title_text[64];
+    snprintf(title_text, sizeof(title_text), "%u%s segments", (unsigned)ws.segment_count,
+             ws.segments_truncated ? "+" : "");
+    lv_label_set_text(title, title_text);
+    lv_obj_set_style_text_color(title, THEME_TEXT_MUTED, LV_PART_MAIN);
+    lv_obj_set_style_text_font(title, THEME_FONT_SMALL, LV_PART_MAIN);
+    segment_plus_button_create(top);
+
+    if (ws.segment_count == 0 || !ws.segments) {
+        lv_obj_t *empty = lv_label_create(s_segment_list);
+        lv_label_set_text(empty, "No WLED segments reported");
+        lv_obj_set_width(empty, LV_PCT(100));
+        lv_obj_set_style_text_align(empty, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_style_text_color(empty, THEME_TEXT_SECONDARY, LV_PART_MAIN);
+        lv_obj_set_style_text_font(empty, THEME_FONT_BODY, LV_PART_MAIN);
+        return;
+    }
+
+    for (uint8_t i = 0; i < ws.segment_count; i++) {
+        segment_panel_create(s_segment_list, &ws.segments[i], &ws);
+    }
+}
+
 static void fx_prev_clicked(lv_event_t *e)
 {
     (void)e;
@@ -2022,9 +2730,23 @@ static void effect_option_changed(lv_event_t *e)
 static void power_clicked(lv_event_t *e)
 {
     (void)e;
-    led_state_t s; led_state_get(&s);
-    led_state_set_power(!s.power);
-    toast_show(s.power ? "Lights OFF" : "Lights ON");
+    led_state_t s;
+    led_state_get(&s);
+    bool target_on = !s.power;
+
+    app_tuning_config_t cfg;
+    if (app_config_tuning_load(&cfg) != ESP_OK) app_config_tuning_defaults(&cfg);
+    uint16_t preset_id = target_on ? cfg.power_on_preset_id : cfg.power_off_preset_id;
+    if (cfg.power_preset_mode_enabled && preset_id > 0) {
+        char json[32];
+        snprintf(json, sizeof(json), "{\"ps\":%u}", (unsigned)preset_id);
+        preset_send(json, target_on ? "Power on preset" : "Power off preset");
+        led_state_set_power(target_on);
+        return;
+    }
+
+    led_state_set_power(target_on);
+    toast_show(target_on ? "Lights ON" : "Lights OFF");
 }
 
 static void bri_changed(lv_event_t *e)
@@ -2512,14 +3234,16 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
 
     s_lights_home_page = lights_panel_create(p);
     s_lights_effects_page = lights_panel_create(p);
+    s_lights_segments_page = lights_panel_create(p);
     s_lights_presets_page = lights_panel_create(p);
     lv_obj_set_height(s_lights_home_page, 1);
     lv_obj_set_flex_grow(s_lights_home_page, 1);
 
-    /* WLED-style tab bar pinned above the panels (Color / Effects / Presets). */
+    /* WLED-style tab bar pinned above the panels (Color / Effects / Segments / Presets). */
     s_lights_tab_page[0] = s_lights_home_page;
     s_lights_tab_page[1] = s_lights_effects_page;
-    s_lights_tab_page[2] = s_lights_presets_page;
+    s_lights_tab_page[2] = s_lights_segments_page;
+    s_lights_tab_page[3] = s_lights_presets_page;
     lv_obj_t *tabbar = lights_tabbar_create(p);
     lv_obj_move_to_index(tabbar, 0);
 
@@ -2953,6 +3677,15 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
         s_pal_preview[i] = blk;
     }
 
+    s_segment_list = lv_obj_create(s_lights_segments_page);
+    lv_obj_remove_style_all(s_segment_list);
+    lv_obj_set_size(s_segment_list, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_min_height(s_segment_list, 440, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_segment_list, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(s_segment_list, 10, LV_PART_MAIN);
+    lv_obj_set_flex_flow(s_segment_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_clear_flag(s_segment_list, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
     s_preset_list = lv_obj_create(s_lights_presets_page);
     lv_obj_remove_style_all(s_preset_list);
     lv_obj_set_size(s_preset_list, LV_PCT(100), LV_SIZE_CONTENT);
@@ -2972,6 +3705,7 @@ lv_obj_t *screen_lights_create(lv_obj_t *parent)
     }
 
     preset_panels_rebuild(true);
+    segment_panels_rebuild(true);
 
     lv_obj_t *tune_card = lv_obj_create(s_lights_effects_page);
     lv_obj_remove_style_all(tune_card);
@@ -3294,9 +4028,6 @@ static void weather_graph_cycle_cb(lv_timer_t *timer)
 {
     (void)timer;
     if (hold_active_until(s_wx_carousel_manual_pause_until_ms)) return;
-    if (s_wx_fc_view.carousel && s_weather_page_root && !lv_obj_has_flag(s_weather_page_root, LV_OBJ_FLAG_HIDDEN)) {
-        wx_carousel_advance(s_wx_fc_view.carousel, WX_FC_GRAPH_COUNT);
-    }
     if (s_wx_history_view.carousel && s_weather_page_root && !lv_obj_has_flag(s_weather_page_root, LV_OBJ_FLAG_HIDDEN)) {
         wx_carousel_advance(s_wx_history_view.carousel, WX_GRAPH_COUNT);
     }
@@ -5685,6 +6416,9 @@ static lv_obj_t *s_settings_system_page;
 static lv_obj_t *s_settings_about_page;
 static lv_obj_t *s_settings_display_status;
 static lv_obj_t *s_light_safety_switch;
+static lv_obj_t *s_power_preset_mode_switch;
+static lv_obj_t *s_power_on_preset_dropdown;
+static lv_obj_t *s_power_off_preset_dropdown;
 static lv_obj_t *s_auto_brightness_switch;
 static lv_obj_t *s_settings_idle_status;
 static lv_obj_t *s_home_wifi_summary;
@@ -5743,6 +6477,7 @@ static bool s_wifi_selected_secure;
 #define THEME_COLOR_MEMORY_COUNT 4
 #define THEME_COLOR_MEMORY_DIR BSP_SD_MOUNT_POINT "/theme"
 #define THEME_COLOR_MEMORY_PATH THEME_COLOR_MEMORY_DIR "/recent_colors.txt"
+#define THEME_COLOR_MEMORY_CHANNEL_TOLERANCE 8
 #define THEME_CONTROL_PANEL_HEX 0x0B1020
 #define THEME_CONTROL_SURFACE_HEX 0x111A2E
 #define THEME_CONTROL_BORDER_HEX 0x33405F
@@ -8063,15 +8798,20 @@ static uint8_t theme_color_channel_delta(uint32_t a, uint32_t b, uint8_t shift)
     return av > bv ? (uint8_t)(av - bv) : (uint8_t)(bv - av);
 }
 
+static uint32_t theme_color_memory_canonical(uint32_t hex)
+{
+    return lv_color_to_u32(lv_color_hex(hex & 0xFFFFFFu)) & 0xFFFFFFu;
+}
+
 static bool theme_color_memory_same(uint32_t a, uint32_t b)
 {
-    a &= 0xFFFFFFu;
-    b &= 0xFFFFFFu;
+    a = theme_color_memory_canonical(a);
+    b = theme_color_memory_canonical(b);
     if (a == b) return true;
     if (lv_color_to_u16(lv_color_hex(a)) == lv_color_to_u16(lv_color_hex(b))) return true;
-    return theme_color_channel_delta(a, b, 16) <= 3 &&
-           theme_color_channel_delta(a, b, 8) <= 3 &&
-           theme_color_channel_delta(a, b, 0) <= 3;
+    return theme_color_channel_delta(a, b, 16) <= THEME_COLOR_MEMORY_CHANNEL_TOLERANCE &&
+           theme_color_channel_delta(a, b, 8) <= THEME_COLOR_MEMORY_CHANNEL_TOLERANCE &&
+           theme_color_channel_delta(a, b, 0) <= THEME_COLOR_MEMORY_CHANNEL_TOLERANCE;
 }
 
 static bool theme_color_memory_compact(void)
@@ -8082,7 +8822,7 @@ static bool theme_color_memory_compact(void)
 
     for (uint8_t i = 0; i < THEME_COLOR_MEMORY_COUNT; i++) {
         if (!s_theme_color_memory_valid[i]) continue;
-        uint32_t hex = s_theme_color_memory[i] & 0xFFFFFFu;
+        uint32_t hex = theme_color_memory_canonical(s_theme_color_memory[i]);
         bool duplicate = false;
         for (uint8_t j = 0; j < count; j++) {
             if (theme_color_memory_same(compact[j], hex)) {
@@ -8138,7 +8878,7 @@ static esp_err_t theme_color_memory_load(void)
         char *end = NULL;
         unsigned long value = strtoul(cursor, &end, 16);
         if (end == cursor) continue;
-        s_theme_color_memory[count] = (uint32_t)value & 0xFFFFFFu;
+        s_theme_color_memory[count] = theme_color_memory_canonical((uint32_t)value);
         s_theme_color_memory_valid[count] = true;
         count++;
     }
@@ -8173,11 +8913,20 @@ static esp_err_t theme_color_memory_add(uint32_t hex)
 {
     esp_err_t err = theme_color_memory_load();
     if (err != ESP_OK) return err;
-    hex &= 0xFFFFFFu;
+    hex = theme_color_memory_canonical(hex);
     if (theme_color_memory_compact()) s_theme_color_memory_dirty = true;
 
     for (uint8_t i = 0; i < THEME_COLOR_MEMORY_COUNT; i++) {
         if (s_theme_color_memory_valid[i] && theme_color_memory_same(s_theme_color_memory[i], hex)) {
+            uint32_t matched_hex = s_theme_color_memory[i] & 0xFFFFFFu;
+            bool changed = i > 0;
+            for (uint8_t shift = i; shift > 0; shift--) {
+                s_theme_color_memory[shift] = s_theme_color_memory[shift - 1];
+                s_theme_color_memory_valid[shift] = s_theme_color_memory_valid[shift - 1];
+            }
+            s_theme_color_memory[0] = matched_hex;
+            s_theme_color_memory_valid[0] = true;
+            s_theme_color_memory_dirty = s_theme_color_memory_dirty || changed;
             theme_color_memory_update_ui();
             return s_theme_color_memory_dirty ? theme_color_memory_save() : ESP_OK;
         }
@@ -8874,10 +9623,170 @@ static void format_coord_x1e6(char *out, size_t out_len, int32_t value)
     snprintf(out, out_len, "%s%ld.%06ld", neg ? "-" : "",
              (long)(abs_value / 1000000), (long)(abs_value % 1000000));
 }
+#define POWER_PRESET_OPTION_MAX (WLED_PRESET_LIST_MAX + 3)
+static uint16_t s_power_preset_option_ids[POWER_PRESET_OPTION_MAX];
+static uint16_t s_power_preset_option_count;
+static uint32_t s_power_preset_options_hash;
 
 static bool weather_status_is_inflight(const char *detail)
 {
     return detail && (!strncmp(detail, "Fetching", 8) || !strcmp(detail, "Weather queued"));
+}
+
+static uint32_t power_preset_options_hash(const wled_state_t *ws, const app_tuning_config_t *cfg)
+{
+    uint32_t hash = 2166136261u;
+    if (cfg) {
+        hash = segment_hash_mix(hash, cfg->power_preset_mode_enabled ? 1u : 0u);
+        hash = segment_hash_mix(hash, cfg->power_on_preset_id);
+        hash = segment_hash_mix(hash, cfg->power_off_preset_id);
+    }
+    if (!ws) return hash;
+    hash = segment_hash_mix(hash, ws->valid ? 1u : 0u);
+    hash = segment_hash_mix(hash, ws->preset_count);
+    hash = segment_hash_mix(hash, ws->presets_truncated ? 1u : 0u);
+    if (ws->presets) {
+        for (uint16_t i = 0; i < ws->preset_count; i++) {
+            hash = segment_hash_mix(hash, ws->presets[i].id);
+            hash = segment_hash_string(hash, ws->presets[i].name);
+        }
+    }
+    return hash;
+}
+
+static void power_preset_clean_name(const char *src, char *dst, size_t dst_len)
+{
+    if (!dst || dst_len == 0) return;
+    size_t out = 0;
+    for (size_t i = 0; src && src[i] && out + 1 < dst_len; i++) {
+        char ch = src[i];
+        dst[out++] = (ch == '\n' || ch == '\r') ? ' ' : ch;
+    }
+    dst[out] = '\0';
+    if (!dst[0]) snprintf(dst, dst_len, "Preset");
+}
+
+static bool power_preset_option_has(uint16_t id)
+{
+    for (uint16_t i = 0; i < s_power_preset_option_count; i++) {
+        if (s_power_preset_option_ids[i] == id) return true;
+    }
+    return false;
+}
+
+static bool power_preset_option_append(char *options, size_t options_len, size_t *used,
+                                       uint16_t id, const char *name)
+{
+    if (!options || !used || *used >= options_len || s_power_preset_option_count >= POWER_PRESET_OPTION_MAX) return false;
+
+    char clean_name[WLED_PRESET_NAME_MAX];
+    power_preset_clean_name(name, clean_name, sizeof(clean_name));
+    const char *prefix = *used ? "\n" : "";
+    int written = id ? snprintf(options + *used, options_len - *used, "%s%u: %s", prefix, (unsigned)id, clean_name)
+                     : snprintf(options + *used, options_len - *used, "%sNone", prefix);
+    if (written < 0 || (size_t)written >= options_len - *used) return false;
+
+    s_power_preset_option_ids[s_power_preset_option_count++] = id;
+    *used += (size_t)written;
+    return true;
+}
+
+static void power_preset_append_saved_option(char *options, size_t options_len, size_t *used, uint16_t id)
+{
+    if (!id || power_preset_option_has(id)) return;
+    char name[WLED_PRESET_NAME_MAX];
+    snprintf(name, sizeof(name), "Saved #%u", (unsigned)id);
+    (void)power_preset_option_append(options, options_len, used, id, name);
+}
+
+static uint16_t power_preset_index_for_id(uint16_t id)
+{
+    for (uint16_t i = 0; i < s_power_preset_option_count; i++) {
+        if (s_power_preset_option_ids[i] == id) return i;
+    }
+    return 0;
+}
+
+static uint16_t power_preset_id_for_dropdown(lv_obj_t *dropdown)
+{
+    if (!dropdown) return 0;
+    uint16_t selected = (uint16_t)lv_dropdown_get_selected(dropdown);
+    return selected < s_power_preset_option_count ? s_power_preset_option_ids[selected] : 0;
+}
+
+static void power_preset_dropdowns_refresh(const app_tuning_config_t *cfg_in)
+{
+    if (!s_power_on_preset_dropdown && !s_power_off_preset_dropdown) return;
+
+    app_tuning_config_t loaded;
+    const app_tuning_config_t *cfg = cfg_in;
+    if (!cfg) {
+        loaded = load_tuning_config();
+        cfg = &loaded;
+    }
+
+    wled_state_t ws;
+    wled_state_get(&ws);
+    uint32_t hash = power_preset_options_hash(&ws, cfg);
+    if (hash != s_power_preset_options_hash) {
+        const size_t options_len = 8192;
+        char *options = heap_caps_malloc(options_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!options) options = malloc(options_len);
+
+        s_power_preset_option_count = 0;
+        if (options) {
+            size_t used = 0;
+            options[0] = '\0';
+            (void)power_preset_option_append(options, options_len, &used, 0, NULL);
+            if (ws.presets) {
+                for (uint16_t i = 0; i < ws.preset_count; i++) {
+                    (void)power_preset_option_append(options, options_len, &used, ws.presets[i].id, ws.presets[i].name);
+                }
+            }
+            power_preset_append_saved_option(options, options_len, &used, cfg->power_on_preset_id);
+            power_preset_append_saved_option(options, options_len, &used, cfg->power_off_preset_id);
+
+            bool was_updating = s_ui_updating;
+            s_ui_updating = true;
+            if (s_power_on_preset_dropdown) lv_dropdown_set_options(s_power_on_preset_dropdown, options);
+            if (s_power_off_preset_dropdown) lv_dropdown_set_options(s_power_off_preset_dropdown, options);
+            s_ui_updating = was_updating;
+            free(options);
+        } else {
+            s_power_preset_option_ids[0] = 0;
+            s_power_preset_option_count = 1;
+            if (s_power_on_preset_dropdown) lv_dropdown_set_options(s_power_on_preset_dropdown, "None");
+            if (s_power_off_preset_dropdown) lv_dropdown_set_options(s_power_off_preset_dropdown, "None");
+        }
+        s_power_preset_options_hash = hash;
+    }
+
+    bool was_updating = s_ui_updating;
+    s_ui_updating = true;
+    if (s_power_on_preset_dropdown) lv_dropdown_set_selected(s_power_on_preset_dropdown, power_preset_index_for_id(cfg->power_on_preset_id));
+    if (s_power_off_preset_dropdown) lv_dropdown_set_selected(s_power_off_preset_dropdown, power_preset_index_for_id(cfg->power_off_preset_id));
+    settings_switch_set_checked(s_power_preset_mode_switch, cfg->power_preset_mode_enabled);
+    s_ui_updating = was_updating;
+}
+
+static void power_preset_mode_switch_event(lv_event_t *e)
+{
+    if (s_ui_updating) return;
+    lv_obj_t *sw = lv_event_get_target(e);
+    app_tuning_config_t cfg = load_tuning_config();
+    cfg.power_preset_mode_enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    if (save_tuning_config(&cfg) == ESP_OK) power_preset_dropdowns_refresh(&cfg);
+}
+
+static void power_preset_dropdown_event(lv_event_t *e)
+{
+    if (s_ui_updating) return;
+    bool on_preset = (intptr_t)lv_event_get_user_data(e) != 0;
+    app_tuning_config_t cfg = load_tuning_config();
+    uint16_t preset_id = power_preset_id_for_dropdown(lv_event_get_target(e));
+    if (on_preset) cfg.power_on_preset_id = preset_id;
+    else cfg.power_off_preset_id = preset_id;
+    if (save_tuning_config(&cfg) == ESP_OK) power_preset_dropdowns_refresh(&cfg);
 }
 
 static void idle_settings_load_fields(void)
@@ -8892,6 +9801,7 @@ static void lights_settings_load_fields(void)
 {
     app_tuning_config_t cfg = load_tuning_config();
     settings_switch_set_checked(s_light_safety_switch, cfg.light_safety_auto_off_enabled);
+    power_preset_dropdowns_refresh(&cfg);
 }
 
 static void display_settings_load_fields(void)
@@ -8974,6 +9884,7 @@ static void settings_status_refresh(lv_timer_t *t)
         label_set_text_if_changed(s_settings_wled_status, wled_text);
     }
     label_set_text_if_changed(s_home_wled_summary, wled_text);
+    power_preset_dropdowns_refresh(NULL);
 
     const char *weather_text = "Not configured";
     if (s_settings_weather_status) {
@@ -9200,7 +10111,7 @@ lv_obj_t *screen_settings_create(lv_obj_t *parent)
     settings_section_title(s_settings_home, "Settings");
     settings_menu_row(s_settings_home, UI_ICON_WIFI, "Wi-Fi", "Scan and connect",
                       &s_home_wifi_summary, settings_wifi_open, NULL);
-    settings_menu_row(s_settings_home, UI_ICON_LIGHTS, "Lights", "Kelvin range, safety",
+    settings_menu_row(s_settings_home, UI_ICON_LIGHTS, "Lights", "Kelvin range, power switch",
                       NULL, settings_panel_clicked, s_settings_lights_page);
     settings_menu_row(s_settings_home, UI_ICON_DISPLAY, "Display", "Backlight, timeout, auto-brightness",
                       NULL, settings_panel_clicked, s_settings_display_page);
@@ -9237,6 +10148,24 @@ lv_obj_t *screen_settings_create(lv_obj_t *parent)
                                                 light_safety_switch_event, NULL);
     add_stepper_row(lights_card, LV_SYMBOL_REFRESH, "Max On Time",
                     1, 1, 24, " h", ap_light_safety_hours, rd_light_safety_hours);
+
+    lv_obj_t *power_card = deep_card(s_settings_lights_page);
+    lv_obj_set_size(power_card, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(power_card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(power_card, 0, LV_PART_MAIN);
+    lv_obj_t *power_title = lv_label_create(power_card);
+    lv_label_set_text(power_title, "Power Switch");
+    lv_obj_set_style_text_color(power_title, THEME_TEXT_SECONDARY, LV_PART_MAIN);
+    lv_obj_set_style_text_font(power_title, THEME_FONT_LABEL, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(power_title, 8, LV_PART_MAIN);
+    s_power_preset_mode_switch = settings_switch_row(power_card, LV_SYMBOL_POWER, "Preset Mode",
+                                                     power_preset_mode_switch_event, NULL);
+    s_power_on_preset_dropdown = settings_dropdown_row(power_card, LV_SYMBOL_PLAY, "On Preset", "None",
+                                                       power_preset_dropdown_event, (void *)1);
+    s_power_off_preset_dropdown = settings_dropdown_row(power_card, LV_SYMBOL_POWER, "Off Preset", "None",
+                                                        power_preset_dropdown_event, NULL);
+    lv_obj_set_width(s_power_on_preset_dropdown, 260);
+    lv_obj_set_width(s_power_off_preset_dropdown, 260);
 
     settings_header(s_settings_wifi_page, "Wi-Fi");
     lv_obj_t *net = deep_card(s_settings_wifi_page);
@@ -9756,6 +10685,7 @@ static lv_obj_t *s_idle_moon_label;
 #define IDLE_TOP_PAD_X 12
 #define IDLE_WEATHER_W 272
 #define IDLE_TEMP_LABEL_W 244
+#define IDLE_TEMP_THREE_DIGIT_X 10
 #define IDLE_MOON_LEFT_PAD ((IDLE_WEATHER_W - IDLE_TEMP_LABEL_W) + 12)
 #define IDLE_MOON_LABEL_W 170
 #define IDLE_MOON_ICON_SCALE 320
@@ -9910,20 +10840,52 @@ static void idle_bottom_panel_reset(void)
     idle_bottom_panel_update(true);
 }
 
+static void idle_temp_set_current(int32_t temp_f)
+{
+    char b[16];
+    snprintf(b, sizeof(b), "%ld°", (long)temp_f);
+    label_set_text_if_changed(s_idle_temp, b);
+    if (s_idle_temp) lv_obj_set_x(s_idle_temp, (temp_f >= 100 || temp_f <= -100) ? IDLE_TEMP_THREE_DIGIT_X : 0);
+}
+
+static void idle_temp_set_unavailable(void)
+{
+    label_set_text_if_changed(s_idle_temp, "--°");
+    if (s_idle_temp) lv_obj_set_x(s_idle_temp, 0);
+}
+
+static bool idle_today_hilo(const weather_state_t *w, int32_t *hi_f, int32_t *lo_f)
+{
+    if (!w || !hi_f || !lo_f) return false;
+    if (w->day_count > 0) {
+        *hi_f = w->days[0].hi_f;
+        *lo_f = w->days[0].lo_f;
+        return true;
+    }
+    if ((w->temp_min_f || w->temp_max_f) &&
+        (w->temp_min_f != w->temp_f || w->temp_max_f != w->temp_f)) {
+        *hi_f = w->temp_max_f;
+        *lo_f = w->temp_min_f;
+        return true;
+    }
+    return false;
+}
+
 static void idle_weather_tick_cb(lv_timer_t *t)
 {
     if (t && s_idle_screen && lv_screen_active() != s_idle_screen) return;
     weather_state_t w;
     if (weather_state_get(&w) == ESP_OK && w.valid) {
         char b[64];
-        snprintf(b, sizeof(b), "%ld°", (long)w.temp_f);
-        label_set_text_if_changed(s_idle_temp, b);
+        idle_temp_set_current(w.temp_f);
         snprintf(b, sizeof(b), "Feels like %ld°", (long)w.feels_f);
         label_set_text_if_changed(s_idle_feels, b);
         if (s_idle_hilo) {
-            if (w.temp_min_f || w.temp_max_f) {
+            int32_t hi_f = 0;
+            int32_t lo_f = 0;
+            if (idle_today_hilo(&w, &hi_f, &lo_f)) {
                 snprintf(b, sizeof(b), LV_SYMBOL_UP " %ld°   " LV_SYMBOL_DOWN " %ld°",
-                         (long)w.temp_max_f, (long)w.temp_min_f);
+                         (long)hi_f, (long)lo_f);
             } else snprintf(b, sizeof(b), "Hi —   Lo —");
             label_set_text_if_changed(s_idle_hilo, b);
         }
@@ -9998,7 +10960,7 @@ static void idle_weather_tick_cb(lv_timer_t *t)
         label_set_text_if_changed(s_idle_m_precip, b);
         idle_bottom_panel_update(false);
     } else {
-        label_set_text_if_changed(s_idle_temp, "--°");
+        idle_temp_set_unavailable();
         label_set_text_if_changed(s_idle_feels, "Feels like —°");
         label_set_text_if_changed(s_idle_hilo, "Hi —   Lo —");
         label_set_text_if_changed(s_idle_cond, "Weather unavailable");
