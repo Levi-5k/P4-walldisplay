@@ -101,6 +101,10 @@ esp_err_t cmd_tx_init(void);
 esp_err_t cmd_tx_send_json(const char *json);
 bool      cmd_tx_is_ready(void);
 
+/* Apply the same power semantics used by the Lights page switch, including
+ * optional WLED power-on/off presets from app tuning. */
+esp_err_t services_request_light_power(bool on, bool *used_preset);
+
 /* I2S mic capture (audio analysis pipeline source). */
 esp_err_t audio_in_init(void);
 
@@ -110,7 +114,7 @@ esp_err_t audio_fft_init(void);
 /* UDP broadcast of normalized audio levels to WLED nodes. */
 esp_err_t sound_sync_tx_init(void);
 
-/* Boot-time WLED provisioning. Skips the push if WLED already responds. */
+/* Boot-time WLED provisioning over RS-485. */
 esp_err_t provision_init(void);
 
 /* Force-push NVS-stored Wi-Fi credentials/base config to WLED over RS-485.

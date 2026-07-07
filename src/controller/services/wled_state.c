@@ -289,9 +289,21 @@ void wled_state_parse_json(const char *json, size_t len)
             strncpy(s_state.version, ver->valuestring, sizeof(s_state.version) - 1);
             s_state.version[sizeof(s_state.version) - 1] = '\0';
         }
+        cJSON *ip = cJSON_GetObjectItem(info, "ip");
+        if (cJSON_IsString(ip) && ip->valuestring) {
+            strncpy(s_state.ip_addr, ip->valuestring, sizeof(s_state.ip_addr) - 1);
+            s_state.ip_addr[sizeof(s_state.ip_addr) - 1] = '\0';
+        }
         cJSON *leds = cJSON_GetObjectItem(info, "leds");
         if (leds) {
             s_state.led_count = (uint16_t)json_int(leds, "count", s_state.led_count);
+        }
+        cJSON *wifi = cJSON_GetObjectItem(info, "wifi");
+        if (wifi) {
+            s_state.wifi_rssi = (int16_t)json_int(wifi, "rssi", s_state.wifi_rssi);
+            s_state.wifi_signal = (uint8_t)json_int(wifi, "signal", s_state.wifi_signal);
+            s_state.wifi_channel = (uint8_t)json_int(wifi, "channel", s_state.wifi_channel);
+            s_state.wifi_ap = json_bool(wifi, "ap", s_state.wifi_ap);
         }
         s_state.uptime_s = (uint32_t)json_int(info, "uptime", s_state.uptime_s);
         s_state.valid = true;

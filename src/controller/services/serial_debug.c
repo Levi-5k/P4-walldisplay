@@ -274,12 +274,17 @@ static void handle_rs485_status(void)
     wled_state_t wled;
     wled_state_get(&wled);
     if (wled.valid) {
-        serial_debug_reply("wled snapshot: on=%s bri=%u fx=%u pal=%u ver='%s' leds=%u uptime=%us",
+        serial_debug_reply("wled snapshot: on=%s bri=%u fx=%u pal=%u ver='%s' leds=%u uptime=%us ip=%s rssi=%d signal=%u%% ch=%u ap=%s",
                            yesno(wled.on), (unsigned)wled.bri,
                            (unsigned)wled.seg0_fx, (unsigned)wled.seg0_pal,
                            wled.version[0] ? wled.version : "?",
                            (unsigned)wled.led_count,
-                           (unsigned)wled.uptime_s);
+                           (unsigned)wled.uptime_s,
+                           wled.ip_addr[0] ? wled.ip_addr : "-",
+                           (int)wled.wifi_rssi,
+                           (unsigned)wled.wifi_signal,
+                           (unsigned)wled.wifi_channel,
+                           yesno(wled.wifi_ap));
     } else {
         serial_debug_reply("wled snapshot: none received yet");
     }

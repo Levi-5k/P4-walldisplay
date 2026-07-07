@@ -44,19 +44,18 @@ These JSON keys must be accepted by the S3 bridge and forwarded into WLED's stat
 | `bri` | 0..255 | P4 brightness 0..100% converted to WLED scale | Master WLED brightness. |
 | `transition` | WLED transition value; currently `7` | P4 LED state publisher | Fade time for power, brightness, and CCT updates. |
 | `mainseg` | segment index | Lights Segments tab | Sets WLED's main segment, matching the WLED webpage segment selection behavior. |
-| `seg[0].id` | segment index; currently `0` | P4 CCT publisher | Targets segment 0 for color temperature updates. |
-| `seg[0].cct` | 0..255 | P4 kelvin mapped through `kelvin_min..kelvin_max` | Segment color temperature. |
-| `seg[0].fx` | 0..255 | Lights effect previous/next controls | Segment effect ID. |
-| `seg[0].pal` | 0..255 | Lights palette previous/next controls | Segment palette ID. |
-| `seg[0].sx` | 0..255 | Lights speed slider | Effect speed. |
-| `seg[0].ix` | 0..255 | Lights intensity slider | Effect intensity. |
-| `seg[0].c1` | 0..255 | Lights effect parameter controls | WLED effect custom slider 1. |
-| `seg[0].c2` | 0..255 | Lights effect parameter controls | WLED effect custom slider 2. |
-| `seg[0].c3` | 0..255 | Lights effect parameter controls | WLED effect custom slider 3. |
-| `seg[0].o1` | boolean | Lights effect option controls | WLED effect option toggle 1. |
-| `seg[0].o2` | boolean | Lights effect option controls | WLED effect option toggle 2. |
-| `seg[0].o3` | boolean | Lights effect option controls | WLED effect option toggle 3. |
-| `seg[0].col` | up to three RGB triples, each channel 0..255 | Lights primary and secondary color controls | Segment color slots; P4 currently edits `col[0]` and `col[1]` while preserving `col[2]` from readback. |
+| `seg.cct` | 0..255 | P4 kelvin mapped through `kelvin_min..kelvin_max` | Color temperature for all selected WLED segments. Sent as an unkeyed `seg` object so WLED applies it only to selected segments. |
+| `seg.fx` | 0..255 | Lights effect previous/next controls | Effect ID for all selected WLED segments. |
+| `seg.pal` | 0..255 | Lights palette previous/next controls | Palette ID for all selected WLED segments. |
+| `seg.sx` | 0..255 | Lights speed slider | Effect speed for all selected WLED segments. |
+| `seg.ix` | 0..255 | Lights intensity slider | Effect intensity for all selected WLED segments. |
+| `seg.c1` | 0..255 | Lights effect parameter controls | WLED effect custom slider 1 for all selected segments. |
+| `seg.c2` | 0..255 | Lights effect parameter controls | WLED effect custom slider 2 for all selected segments. |
+| `seg.c3` | 0..255 | Lights effect parameter controls | WLED effect custom slider 3 for all selected segments. |
+| `seg.o1` | boolean | Lights effect option controls | WLED effect option toggle 1 for all selected segments. |
+| `seg.o2` | boolean | Lights effect option controls | WLED effect option toggle 2 for all selected segments. |
+| `seg.o3` | boolean | Lights effect option controls | WLED effect option toggle 3 for all selected segments. |
+| `seg.col` | up to three RGB/RGBW color slots, each channel 0..255 | Lights primary, accent, and white controls | Color slots for all selected segments. P4 edits `col[0]` and `col[1]` as RGB for primary/accent, and sends `col[0]` as RGBW with a white-channel value when the White chip is selected. |
 | `seg.id` | segment index | Lights Segments tab | Targets one WLED segment for segment-tab edits. |
 | `seg.n` | string, up to WLED segment name limits | Lights Segments tab name field | Segment display name. |
 | `seg.start` / `seg.stop` | LED bounds | Lights Segments tab bounds controls | Segment start and exclusive stop LED. `stop:0` deletes a segment when more than one exists. |
@@ -84,21 +83,22 @@ These JSON keys must be accepted by the S3 bridge and forwarded into WLED's stat
 Example state update emitted by the P4 LED state publisher:
 
 ```json
-{"on":true,"bri":128,"transition":7,"seg":[{"id":0,"cct":74}]}
+{"on":true,"bri":128,"transition":7,"seg":{"cct":74}}
 ```
 
 Example direct controls from the Lights page:
 
 ```json
-{"seg":[{"fx":42}]}
-{"seg":[{"pal":5}]}
-{"seg":[{"sx":180}]}
-{"seg":[{"ix":96}]}
-{"seg":[{"c1":64}]}
-{"seg":[{"c2":128}]}
-{"seg":[{"c3":16}]}
-{"seg":[{"o1":true}]}
-{"seg":[{"col":[[255,64,0],[0,64,255],[0,0,0]]}]}
+{"seg":{"fx":42}}
+{"seg":{"pal":5}}
+{"seg":{"sx":180}}
+{"seg":{"ix":96}}
+{"seg":{"c1":64}}
+{"seg":{"c2":128}}
+{"seg":{"c3":16}}
+{"seg":{"o1":true}}
+{"seg":{"col":[[255,64,0],[0,64,255]]}}
+{"seg":{"cct":74,"col":[[0,0,0,255]]}}
 {"mainseg":1,"seg":{"id":1,"sel":true}}
 {"seg":{"id":1,"n":"Shelf","start":60,"stop":120,"grp":1,"spc":0,"of":0}}
 {"seg":{"id":1,"on":true,"bri":192,"sel":true,"rev":false,"mi":false,"frz":false}}
@@ -225,7 +225,7 @@ These are not runtime settings the P4 changes over RS-485. The board-level items
 | `RLYPIN` | `-1`; onboard relay is GPIO47 | Keep WLED's native relay disabled so the 86Box usermod is the only relay owner. |
 | `USERMOD_86BOX_PSU_RELAY_PIN` | `47` | GPIO for the Waveshare onboard relay that switches the LED power supply. |
 | `USERMOD_86BOX_PSU_RELAY_ACTIVE_HIGH` | `1` | Relay output active level; change from the S3 WLED Usermods page if hardware testing shows inversion is needed. |
-| `USERMOD_86BOX_PSU_RELAY_ON_LEAD_MS` | `750` | Delay before applying P4 LED-on JSON after energizing the PSU relay. |
+| `USERMOD_86BOX_PSU_RELAY_ON_LEAD_MS` | `750` | S3-side relay lead time for normal preset/color commands. Explicit P4 black warm-up commands (`on:true`, `bri<=1`, black `seg.col`, `transition:0`) force WLED globally dark without changing saved segment colors, repeatedly clock black frames, then energize the relay while continuing to clock black frames through the relay lead time. |
 | `USERMOD_86BOX_PSU_RELAY_OFF_HOLD_MS` | `10000` | Time to keep the PSU energized after WLED output reaches off. |
 | `USERMOD_86BOX_PSU_RELAY_MIN_CYCLE_MS` | `1500` | Minimum interval between relay output transitions to avoid chatter. |
 | I2S audio pins | `-1` | Disabled to avoid conflicts with relay GPIO47 and unused mic pins. |

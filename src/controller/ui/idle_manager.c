@@ -8,6 +8,7 @@
 #include "screens.h"
 #include "led_state.h"
 #include "app_config.h"
+#include "services.h"
 #include "theme.h"
 
 #include <stdio.h>
@@ -181,10 +182,24 @@ static void wake_timer_apply_pos(lv_obj_t *obj, int32_t x, int32_t y)
     lv_obj_set_pos(obj, s_wake_timer_x, s_wake_timer_y);
 }
 
+static void wake_timer_request_power_on(const char *reason)
+{
+    led_state_t ls;
+    led_state_get(&ls);
+    if (ls.power) return;
+
+    bool used_preset = false;
+    esp_err_t err = services_request_light_power(true, &used_preset);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "%s power-on request failed: %s", reason ? reason : "wake timer", esp_err_to_name(err));
+    }
+    if (used_preset) ESP_LOGI(TAG, "%s used power-on preset", reason ? reason : "wake timer");
+}
+
 static void wake_timer_dismiss(void)
 {
     led_state_hold_power_on_for(0);
-    led_state_set_power(true);
+    wake_timer_request_power_on("wake timer dismiss");
     wake_lights_timer_stop();
     ESP_LOGI(TAG, "idle wake lights timer dismissed; lights held on");
 }
@@ -230,7 +245,7 @@ static void wake_timer_apply_slider_minutes(uint16_t minutes)
     s_wake_lights_off_at_ms = now + remaining_ms;
     s_wake_lights_duration_ms = remaining_ms;
     led_state_hold_power_on_for(remaining_ms);
-    led_state_set_power(true);
+    wake_timer_request_power_on("wake timer adjust");
     wake_timer_slider_label_set(minutes);
 }
 
@@ -549,7 +564,7 @@ void idle_manager_light_timer_start_minutes(uint16_t minutes)
     uint32_t duration_ms = (uint32_t)minutes * 60u * 1000u;
     uint32_t now = idle_now_ms();
     led_state_hold_power_on_for(duration_ms);
-    led_state_set_power(true);
+    wake_timer_request_power_on("wake timer start");
 
     s_wake_lights_timer_on = true;
     s_wake_lights_started_at_ms = now;
@@ -577,7 +592,7 @@ void idle_manager_light_timer_stop(bool keep_lights_on)
 {
     if (keep_lights_on) {
         led_state_hold_power_on_for(0);
-        led_state_set_power(true);
+        wake_timer_request_power_on("wake timer stop");
     } else {
         led_state_clear_power_on_hold();
         led_state_set_power(false);
@@ -672,8 +687,11 @@ static void idle_handle_dismissed(bool wake_lights_allowed)
     }
 
     idle_start_wake_lights_hold(&tuning);
-    led_state_set_power(true);
+    bool used_preset = false;
+    esp_err_t err = services_request_light_power(true, &used_preset);
     ESP_LOGI(TAG, "idle dismiss lights on%s", tuning.idle_dismiss_lights_timer_on ? " with timer" : "");
+    if (err != ESP_OK) ESP_LOGW(TAG, "idle dismiss power preset send failed: %s", esp_err_to_name(err));
+    if (used_preset) ESP_LOGI(TAG, "idle dismiss used power-on preset");
 }
 
 static bool idle_snooze_active(uint32_t now)

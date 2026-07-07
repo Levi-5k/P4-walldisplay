@@ -91,6 +91,7 @@ static void persist(void)
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
     nvs_set_u8 (h, "bri",    s.brightness_pct);
+    nvs_set_u8 (h, "wbri",   s.white_brightness_pct);
     nvs_set_u16(h, "kelvin", s.kelvin);
     nvs_set_u8 (h, "hue0",   s.primary_hue);
     nvs_set_u8 (h, "hue1",   s.secondary_hue);
@@ -106,6 +107,7 @@ esp_err_t led_state_init(void)
 {
     s.power                  = false;
     s.brightness_pct         = 50;
+    s.white_brightness_pct   = 100;
     s.kelvin                 = 3500;
     s.primary_hue            = 0;
     s.secondary_hue          = 0;
@@ -122,6 +124,7 @@ esp_err_t led_state_init(void)
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
         nvs_get_u8 (h, "bri",    &s.brightness_pct);
+        nvs_get_u8 (h, "wbri",   &s.white_brightness_pct);
         nvs_get_u16(h, "kelvin", &s.kelvin);
         nvs_get_u8 (h, "hue0",   &s.primary_hue);
         nvs_get_u8 (h, "hue1",   &s.secondary_hue);
@@ -132,6 +135,7 @@ esp_err_t led_state_init(void)
         nvs_close(h);
     }
     if (s.brightness_pct > 100) s.brightness_pct = 100;
+    if (s.white_brightness_pct > 100) s.white_brightness_pct = 100;
     if (s.kelvin < s.kelvin_min) s.kelvin = s.kelvin_min;
     if (s.kelvin > s.kelvin_max) s.kelvin = s.kelvin_max;
     s_power_on_since_ms = s.power ? now_ms() : 0;
@@ -139,8 +143,8 @@ esp_err_t led_state_init(void)
 
     /* Backlight is applied separately once display_bsp is up. */
 
-    ESP_LOGI(TAG, "init power=%d bri=%u%% K=%u hue=(%u,%u) (%u..%u) timeout=%us disp=%u%%",
-             s.power, s.brightness_pct, s.kelvin,
+    ESP_LOGI(TAG, "init power=%d bri=%u%% wbri=%u%% K=%u hue=(%u,%u) (%u..%u) timeout=%us disp=%u%%",
+             s.power, s.brightness_pct, s.white_brightness_pct, s.kelvin,
              s.primary_hue, s.secondary_hue,
              s.kelvin_min, s.kelvin_max,
              s.screen_timeout_s, s.display_brightness_pct);
@@ -190,6 +194,14 @@ void led_state_set_brightness(uint8_t pct)
     if (pct > 100) pct = 100;
     if (s.brightness_pct == pct) return;
     s.brightness_pct = pct;
+    notify();
+}
+
+void led_state_set_white_brightness(uint8_t pct)
+{
+    if (pct > 100) pct = 100;
+    if (s.white_brightness_pct == pct) return;
+    s.white_brightness_pct = pct;
     notify();
 }
 

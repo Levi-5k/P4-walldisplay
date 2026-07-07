@@ -85,8 +85,13 @@ typedef struct {
 
     /* Info */
     char     version[24];
+    char     ip_addr[16];
     uint16_t led_count;
     uint32_t uptime_s;
+    int16_t  wifi_rssi;
+    uint8_t  wifi_signal;
+    uint8_t  wifi_channel;
+    bool     wifi_ap;
 
     bool     valid;
     uint32_t last_update_ms;

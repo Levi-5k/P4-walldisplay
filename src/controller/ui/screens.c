@@ -306,6 +306,7 @@ static void text_color_set_if_changed(lv_obj_t *obj, lv_color_t color)
 #define LIGHTS_PRESET_MAX 250
 #define LIGHTS_COLOR_SLOT_PRIMARY 0
 #define LIGHTS_COLOR_SLOT_SECONDARY 1
+#define LIGHTS_COLOR_SLOT_WHITE 2
 #define LIGHTS_LOCAL_ECHO_HOLD_MS 2500u
 #define LIGHTS_PRESET_CMD_MAX 500
 
@@ -364,6 +365,7 @@ static lv_obj_t *s_lights_conn_badge;   /* connection pill in the hero header */
 static lv_obj_t *s_lights_conn_label;
 static lv_obj_t *s_lights_wled_detail;
 static lv_obj_t *s_lights_picker_chip[3];
+static lv_obj_t *s_lights_picker_select[3];
 static lv_obj_t *s_lights_picker_box[3];
 static lv_obj_t *s_lights_timer_card;
 static lv_obj_t *s_lights_timer_chip_row;
@@ -500,7 +502,7 @@ static void kelvin_tint_set(uint16_t kelvin)
 #define LIGHTS_COLOR_PANEL_W    270
 #define LIGHTS_COLOR_CHIP_SIZE  48
 #define LIGHTS_COLOR_HISTORY_COUNT 5
-#define LIGHTS_COLOR_PRESET_COUNT 6
+#define LIGHTS_COLOR_PRESET_COUNT 7
 #define LIGHTS_SWATCH_PRESET_BASE 0x100u
 
 typedef struct {
@@ -515,6 +517,7 @@ static const lights_color_swatch_t s_color_presets[LIGHTS_COLOR_PRESET_COUNT] = 
     {false, 128},  /* cyan */
     {false, 170},  /* blue */
     {false, 213},  /* violet */
+    {true, 3500},  /* white */
 };
 
 static lights_color_swatch_t s_color_history[LIGHTS_COLOR_HISTORY_COUNT];
@@ -623,6 +626,48 @@ static void send_current_hue_slots(bool save)
     if (save) led_state_persist_current();
 }
 
+static uint8_t lights_pct_to_wled_bri(uint8_t pct)
+{
+    if (pct > 100) pct = 100;
+    return (uint8_t)(((uint32_t)pct * 255u + 50u) / 100u);
+}
+
+static uint8_t lights_kelvin_to_wled_cct(const led_state_t *state)
+{
+    if (!state || state->kelvin_max <= state->kelvin_min) return 127;
+    uint16_t kelvin = state->kelvin;
+    if (kelvin < state->kelvin_min) kelvin = state->kelvin_min;
+    if (kelvin > state->kelvin_max) kelvin = state->kelvin_max;
+    uint32_t span = (uint32_t)state->kelvin_max - state->kelvin_min;
+    return (uint8_t)((((uint32_t)kelvin - state->kelvin_min) * 255u + span / 2u) / span);
+}
+
+static void lights_send_white_channel(const led_state_t *state)
+{
+    if (!state) return;
+    char json[88];
+    snprintf(json, sizeof(json), "{\"seg\":{\"cct\":%u,\"col\":[[0,0,0,%u]]}}",
+             lights_kelvin_to_wled_cct(state),
+             lights_pct_to_wled_bri(state->white_brightness_pct));
+    cmd_tx_send_json(json);
+}
+
+static bool lights_white_mode_active(void)
+{
+    return s_lights_picker_mode == LIGHTS_COLOR_SLOT_WHITE;
+}
+
+static void lights_brightness_slider_refresh(const led_state_t *state)
+{
+    if (!state || !s_bri_slider || s_bri_dragging) return;
+    uint8_t pct = lights_white_mode_active() ? state->white_brightness_pct : state->brightness_pct;
+    slider_set_range_if_changed(s_bri_slider, 0, 100);
+    slider_set_value_if_changed(s_bri_slider, pct);
+    brightness_label_set(pct);
+    bg_color_set_if_changed(s_bri_slider, LV_PART_INDICATOR,
+                            lights_white_mode_active() ? kelvin_to_color(state->kelvin) : THEME_ACCENT_COLOR);
+}
+
 static lv_color_t lights_swatch_color(const lights_color_swatch_t *swatch)
 {
     if (!swatch) return lv_color_hex(0x202A3C);
@@ -688,7 +733,6 @@ static void lights_color_history_add(bool kelvin, uint16_t value)
 static void lights_color_history_seed(const led_state_t *state)
 {
     if (!state || s_color_history_valid[0]) return;
-    lights_color_history_add(true, state->kelvin);
     lights_color_history_add(false, state->secondary_hue);
     lights_color_history_add(false, state->primary_hue);
 }
@@ -781,11 +825,6 @@ static void lights_apply_led_state(const led_state_t *s)
 {
     if (!s) return;
     s_ui_updating = true;
-    if (s_bri_slider && !s_bri_dragging) {
-        slider_set_range_if_changed(s_bri_slider, 0, 100);
-        slider_set_value_if_changed(s_bri_slider, s->brightness_pct);
-        brightness_label_set(s->brightness_pct);
-    }
     if (!color_slot_locally_owned(LIGHTS_COLOR_SLOT_PRIMARY)) {
         slider_set_value_if_changed(s_color_slider, s->primary_hue);
         color_label_set(s_color_label, s->primary_hue);
@@ -803,6 +842,7 @@ static void lights_apply_led_state(const led_state_t *s)
         kelvin_tint_set(s->kelvin);
         kelvin_labels_set(s->kelvin);
     }
+    lights_brightness_slider_refresh(s);
     apply_power_visual(s->power);
     s_ui_updating = false;
 }
@@ -1115,13 +1155,15 @@ static void lights_timer_panel_refresh(lv_timer_t *t)
         idle_manager_light_timer_get(&timer);
     }
 
+    if (s_lights_timer_adjusting) return;
+
     lights_timer_time_set(timer.remaining_ms);
 
     char minute_text[20];
     lights_timer_format_minutes(timer.remaining_minutes, minute_text, sizeof(minute_text));
     char detail[40];
     snprintf(detail, sizeof(detail), "Remaining %s", minute_text);
-    if (!s_lights_timer_adjusting) label_set_text_if_changed(s_lights_timer_detail, detail);
+    label_set_text_if_changed(s_lights_timer_detail, detail);
 
     uint32_t progress = 1000u;
     if (timer.duration_ms > 0) {
@@ -2664,7 +2706,7 @@ static void fx_prev_clicked(lv_event_t *e)
     uint8_t fx = wled_effect_catalog_adjacent_id(ws.seg0_fx, -1);
     lights_effect_selector_set(fx);
     char json[48];
-    snprintf(json, sizeof(json), "{\"seg\":[{\"fx\":%u}]}", fx);
+    snprintf(json, sizeof(json), "{\"seg\":{\"fx\":%u}}", fx);
     cmd_tx_send_json(json);
 }
 
@@ -2676,7 +2718,7 @@ static void fx_next_clicked(lv_event_t *e)
     uint8_t fx = wled_effect_catalog_adjacent_id(ws.seg0_fx, 1);
     lights_effect_selector_set(fx);
     char json[48];
-    snprintf(json, sizeof(json), "{\"seg\":[{\"fx\":%u}]}", fx);
+    snprintf(json, sizeof(json), "{\"seg\":{\"fx\":%u}}", fx);
     cmd_tx_send_json(json);
 }
 
@@ -2687,7 +2729,7 @@ static void fx_dropdown_changed(lv_event_t *e)
     uint8_t fx = wled_effect_catalog_id_for_index(index);
     lights_effect_selector_set(fx);
     char json[48];
-    snprintf(json, sizeof(json), "{\"seg\":[{\"fx\":%u}]}", fx);
+    snprintf(json, sizeof(json), "{\"seg\":{\"fx\":%u}}", fx);
     cmd_tx_send_json(json);
 }
 
@@ -2698,7 +2740,7 @@ static void pal_dropdown_changed(lv_event_t *e)
     uint8_t pal = wled_palette_catalog_id_for_index(index);
     lights_palette_preview_set(pal);
     char json[48];
-    snprintf(json, sizeof(json), "{\"seg\":[{\"pal\":%u}]}", pal);
+    snprintf(json, sizeof(json), "{\"seg\":{\"pal\":%u}}", pal);
     cmd_tx_send_json(json);
 }
 
@@ -2712,7 +2754,7 @@ static void effect_param_changed(lv_event_t *e)
     int v = lv_slider_get_value(lv_event_get_target(e));
     effect_param_value_label_set(index, (uint8_t)v);
     char json[48];
-    snprintf(json, sizeof(json), "{\"seg\":[{\"%s\":%d}]}", effect_param_key(index), v);
+    snprintf(json, sizeof(json), "{\"seg\":{\"%s\":%d}}", effect_param_key(index), v);
     cmd_tx_send_json(json);
 }
 
@@ -2723,7 +2765,7 @@ static void effect_option_changed(lv_event_t *e)
     if (index >= WLED_EFFECT_OPTION_COUNT) return;
     bool checked = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
     char json[48];
-    snprintf(json, sizeof(json), "{\"seg\":[{\"%s\":%s}]}", effect_option_key(index), checked ? "true" : "false");
+    snprintf(json, sizeof(json), "{\"seg\":{\"%s\":%s}}", effect_option_key(index), checked ? "true" : "false");
     cmd_tx_send_json(json);
 }
 
@@ -2734,19 +2776,11 @@ static void power_clicked(lv_event_t *e)
     led_state_get(&s);
     bool target_on = !s.power;
 
-    app_tuning_config_t cfg;
-    if (app_config_tuning_load(&cfg) != ESP_OK) app_config_tuning_defaults(&cfg);
-    uint16_t preset_id = target_on ? cfg.power_on_preset_id : cfg.power_off_preset_id;
-    if (cfg.power_preset_mode_enabled && preset_id > 0) {
-        char json[32];
-        snprintf(json, sizeof(json), "{\"ps\":%u}", (unsigned)preset_id);
-        preset_send(json, target_on ? "Power on preset" : "Power off preset");
-        led_state_set_power(target_on);
-        return;
-    }
-
-    led_state_set_power(target_on);
-    toast_show(target_on ? "Lights ON" : "Lights OFF");
+    bool used_preset = false;
+    esp_err_t err = services_request_light_power(target_on, &used_preset);
+    if (err != ESP_OK) toast_show(esp_err_to_name(err));
+    else if (used_preset) toast_show(target_on ? "Power on preset" : "Power off preset");
+    else toast_show(target_on ? "Lights ON" : "Lights OFF");
 }
 
 static void bri_changed(lv_event_t *e)
@@ -2766,13 +2800,20 @@ static void bri_changed(lv_event_t *e)
     if (code == LV_EVENT_VALUE_CHANGED && !rate_limit_ms(&s_bri_update_ms, 90)) return;
 
     s_skip_lights_sync = true;
-    led_state_set_brightness((uint8_t)v);
+    if (lights_white_mode_active()) led_state_set_white_brightness((uint8_t)v);
+    else led_state_set_brightness((uint8_t)v);
     s_skip_lights_sync = false;
+
+    if (lights_white_mode_active()) {
+        led_state_t state;
+        led_state_get(&state);
+        lights_send_white_channel(&state);
+    }
 
     if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
         s_bri_dragging = false;
         led_state_persist_current();
-        char buf[24]; snprintf(buf, sizeof(buf), "Brightness  %d%%", v);
+        char buf[24]; snprintf(buf, sizeof(buf), lights_white_mode_active() ? "White  %d%%" : "Brightness  %d%%", v);
         toast_show(buf);
     }
 }
@@ -2822,7 +2863,6 @@ static void kel_changed(lv_event_t *e)
     kelvin_tint_set((uint16_t)v);
     if (code != LV_EVENT_VALUE_CHANGED) {
         led_state_persist_current();
-        lights_color_history_add(true, (uint16_t)v);
         char buf[24]; snprintf(buf, sizeof(buf), "Color  %d K", v);
         toast_show(buf);
     }
@@ -3090,18 +3130,25 @@ static void lights_mode_select(int idx)
     if (idx > 2) idx = 2;
     s_lights_picker_mode = (uint8_t)idx;
     for (int i = 0; i < 3; i++) {
+        if (s_lights_picker_select[i]) {
+            bool on = (i == idx);
+            lv_obj_set_style_bg_color(s_lights_picker_select[i], on ? THEME_SURFACE_COLOR : lv_color_black(), LV_PART_MAIN);
+            lv_obj_set_style_bg_opa(s_lights_picker_select[i], on ? theme_surface_opa() : LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_set_style_border_width(s_lights_picker_select[i], on ? 2 : 1, LV_PART_MAIN);
+            lv_obj_set_style_border_color(s_lights_picker_select[i], on ? theme_primary_color() : lv_color_hex(0x263754), LV_PART_MAIN);
+        }
         if (s_lights_picker_box[i]) {
             if (i == idx) lv_obj_clear_flag(s_lights_picker_box[i], LV_OBJ_FLAG_HIDDEN);
             else lv_obj_add_flag(s_lights_picker_box[i], LV_OBJ_FLAG_HIDDEN);
         }
         if (s_lights_picker_chip[i]) {
-            bool on = (i == idx);
-            lv_obj_set_style_border_width(s_lights_picker_chip[i], on ? 3 : 1, LV_PART_MAIN);
-            lv_obj_set_style_border_color(s_lights_picker_chip[i],
-                                          on ? lv_color_white() : lv_color_hex(0x263754),
-                                          LV_PART_MAIN);
+            lv_obj_set_style_border_width(s_lights_picker_chip[i], 1, LV_PART_MAIN);
+            lv_obj_set_style_border_color(s_lights_picker_chip[i], lv_color_hex(0x263754), LV_PART_MAIN);
         }
     }
+    led_state_t state;
+    led_state_get(&state);
+    lights_brightness_slider_refresh(&state);
 }
 
 static void lights_mode_clicked(lv_event_t *e)
@@ -3121,9 +3168,14 @@ static void lights_apply_swatch(const lights_color_swatch_t *swatch)
         kelvin_tint_set(kelvin);
         s_skip_lights_sync = true;
         led_state_set_kelvin(kelvin);
+        led_state_t state;
+        led_state_get(&state);
+        if (state.white_brightness_pct == 0) led_state_set_white_brightness(100);
         s_skip_lights_sync = false;
+        led_state_get(&state);
+        lights_brightness_slider_refresh(&state);
+        lights_send_white_channel(&state);
         led_state_persist_current();
-        lights_color_history_add(true, kelvin);
         toast_show("White applied");
         return;
     }
@@ -3204,7 +3256,16 @@ static lv_obj_t *lights_current_color_chip_create(lv_obj_t *parent, int mode, co
     lv_obj_set_flex_flow(item, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(item, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(item, 6, LV_PART_MAIN);
-    lv_obj_clear_flag(item, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_pad_all(item, 5, LV_PART_MAIN);
+    lv_obj_set_style_radius(item, 14, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(item, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(item, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(item, lv_color_hex(0x263754), LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(item, 0, LV_PART_MAIN);
+    lv_obj_add_flag(item, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(item, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(item, lights_mode_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)mode);
+    s_lights_picker_select[mode] = item;
 
     lv_obj_t *chip = lv_button_create(item);
     lv_obj_set_size(chip, LIGHTS_COLOR_CHIP_SIZE, LIGHTS_COLOR_CHIP_SIZE);
@@ -6246,6 +6307,7 @@ DEFINE_TUNING_ACCESSORS(wx_bottom_cycle, weather_bottom_panel_cycle_s, idle_bott
 DEFINE_TUNING_ACCESSORS(wled_poll, wled_poll_s, (void)0)
 DEFINE_TUNING_ACCESSORS(wled_stale, wled_stale_s, (void)0)
 DEFINE_TUNING_ACCESSORS(wled_hue_update, wled_hue_update_hz, lights_tuning_refresh())
+DEFINE_TUNING_ACCESSORS(power_on_delay, power_on_delay_ms, (void)0)
 DEFINE_TUNING_ACCESSORS(light_safety_hours, light_safety_auto_off_hours, led_state_safety_check_now())
 DEFINE_TUNING_ACCESSORS(auto_min, auto_brightness_min_pct, tuning_backlight_changed())
 DEFINE_TUNING_ACCESSORS(auto_max, auto_brightness_max_pct, tuning_backlight_changed())
@@ -10166,6 +10228,8 @@ lv_obj_t *screen_settings_create(lv_obj_t *parent)
                                                         power_preset_dropdown_event, NULL);
     lv_obj_set_width(s_power_on_preset_dropdown, 260);
     lv_obj_set_width(s_power_off_preset_dropdown, 260);
+    add_stepper_row(power_card, LV_SYMBOL_REFRESH, "On Delay",
+                    100, 0, 5000, " ms", ap_power_on_delay, rd_power_on_delay);
 
     settings_header(s_settings_wifi_page, "Wi-Fi");
     lv_obj_t *net = deep_card(s_settings_wifi_page);

@@ -54,6 +54,7 @@ typedef struct {
     bool power_preset_mode_enabled;
     uint16_t power_on_preset_id;
     uint16_t power_off_preset_id;
+    uint16_t power_on_delay_ms;
     bool light_safety_auto_off_enabled;
     uint8_t light_safety_auto_off_hours;
     bool auto_brightness_enabled;

@@ -377,6 +377,62 @@ private:
     return false;
   }
 
+  static bool colorArrayIsBlack(JsonArray colors)
+  {
+    if (colors.isNull()) return false;
+
+    bool sawChannel = false;
+    for (JsonVariant colorValue : colors) {
+      JsonArray color = colorValue.as<JsonArray>();
+      if (color.isNull()) continue;
+
+      for (JsonVariant channelValue : color) {
+        if (!channelValue.is<int>()) continue;
+        sawChannel = true;
+        if (channelValue.as<int>() != 0) return false;
+      }
+    }
+    return sawChannel;
+  }
+
+  static bool segmentColorsAreBlack(JsonVariant segment)
+  {
+    JsonObject segmentObject = segment.as<JsonObject>();
+    if (!segmentObject.isNull()) return colorArrayIsBlack(segmentObject[F("col")].as<JsonArray>());
+
+    JsonArray segments = segment.as<JsonArray>();
+    if (segments.isNull()) return false;
+
+    bool sawColors = false;
+    for (JsonVariant segmentValue : segments) {
+      JsonObject item = segmentValue.as<JsonObject>();
+      if (item.isNull() || item[F("col")].isNull()) continue;
+      if (!colorArrayIsBlack(item[F("col")].as<JsonArray>())) return false;
+      sawColors = true;
+    }
+    return sawColors;
+  }
+
+  bool incomingStateIsPsuWarmup(JsonObject root) const
+  {
+    if (!root[F("ps")].isNull()) return false;
+    if (!root[F("np")].isNull()) return false;
+    if (!root[F("playlist")].isNull()) return false;
+    if (!root[F("psave")].isNull()) return false;
+    if (!root[F("pdel")].isNull()) return false;
+    if (!root[F("rb")].isNull()) return false;
+
+    JsonVariant onValue = root[F("on")];
+    JsonVariant briValue = root[F("bri")];
+    if (onValue.isNull() || !jsonTruthy(onValue, false)) return false;
+    if (briValue.isNull() || briValue.as<int>() > 1) return false;
+
+    JsonVariant transitionValue = root[F("transition")];
+    if (!transitionValue.isNull() && transitionValue.as<int>() != 0) return false;
+
+    return segmentColorsAreBlack(root[F("seg")]);
+  }
+
   bool wledCurrentlyNeedsPsuPower() const
   {
     return bri > 0 || strip.getBrightness() > 0;
@@ -465,18 +521,57 @@ private:
     }
   }
 
-  void waitForPsuRelayOnLead()
+  void showPsuWarmupBlackFrame()
+  {
+    strip.suspend();
+    strip.waitForIt();
+    for (size_t i = 0; i < strip.getSegmentsNum(); i++) {
+      Segment &seg = strip.getSegment(i);
+      if (seg.isActive()) seg.fill(BLACK);
+    }
+    strip.resume();
+    strip.setBrightness(0, false);
+    strip.trigger();
+    strip.service();
+  }
+
+  void serviceStripForPsuWarmup(unsigned long durationMs)
+  {
+    unsigned long startMs = millis();
+    do {
+      showPsuWarmupBlackFrame();
+      delay(5);
+      yield();
+    } while (!elapsed(startMs, durationMs));
+  }
+
+  void applyPsuWarmupDarkState()
+  {
+    StaticJsonDocument<128> darkDoc;
+    JsonObject dark = darkDoc.to<JsonObject>();
+    dark[F("on")] = false;
+    dark[F("bri")] = 0;
+    dark[F("transition")] = 0;
+    deserializeState(dark, CALL_MODE_NO_NOTIFY);
+    strip.setBrightness(0, true);
+    strip.trigger();
+    serviceStripForPsuWarmup(100);
+  }
+
+  void waitForPsuRelayOnLead(bool serviceStrip)
   {
     if (!psuRelayReady) return;
 
     unsigned long waitStartedMs = millis();
     unsigned long maxWaitMs = (unsigned long)psuRelayMinCycleMs + psuRelayOnLeadMs + 100UL;
     while (!setPsuRelay(true) && !elapsed(waitStartedMs, maxWaitMs)) {
+      if (serviceStrip) showPsuWarmupBlackFrame();
       delay(10);
       yield();
     }
 
     while (psuRelayOn && !elapsed(psuRelayOnSinceMs, psuRelayOnLeadMs) && !elapsed(waitStartedMs, maxWaitMs)) {
+      if (serviceStrip) showPsuWarmupBlackFrame();
       delay(10);
       yield();
     }
@@ -673,6 +768,16 @@ private:
     JsonObject targetInfo = target.createNestedObject(F("info"));
     copyJsonValue(targetInfo, sourceInfo, "ver");
     copyJsonValue(targetInfo, sourceInfo, "uptime");
+    copyJsonValue(targetInfo, sourceInfo, "ip");
+
+    JsonObject sourceWifi = sourceInfo[F("wifi")].as<JsonObject>();
+    if (!sourceWifi.isNull()) {
+      JsonObject targetWifi = targetInfo.createNestedObject(F("wifi"));
+      copyJsonValue(targetWifi, sourceWifi, "rssi");
+      copyJsonValue(targetWifi, sourceWifi, "signal");
+      copyJsonValue(targetWifi, sourceWifi, "channel");
+      copyJsonValue(targetWifi, sourceWifi, "ap");
+    }
 
     JsonObject sourceLeds = sourceInfo[F("leds")].as<JsonObject>();
     if (!sourceLeds.isNull()) {
@@ -728,7 +833,9 @@ private:
     serializeConfigToFS();
     if (reconnectWifi) {
       forceReconnect = true;
-      DEBUG_PRINTLN(F("86Box RS485 bridge: WiFi reconnect requested"));
+      lastReconnectAttempt = 0;
+      interfacesInited = false;
+      DEBUG_PRINTLN(F("86Box RS485 bridge: WiFi credentials applied; reconnect requested"));
     }
 #else
     (void)root;
@@ -737,7 +844,13 @@ private:
 
   void applyState(JsonObject root)
   {
-    if (incomingStateMayNeedPsuPower(root)) waitForPsuRelayOnLead();
+    if (incomingStateIsPsuWarmup(root)) {
+      applyPsuWarmupDarkState();
+      waitForPsuRelayOnLead(true);
+      return;
+    }
+
+    if (incomingStateMayNeedPsuPower(root)) waitForPsuRelayOnLead(false);
     deserializeState(root, CALL_MODE_DIRECT_CHANGE);
     servicePsuRelay();
   }

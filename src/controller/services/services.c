@@ -62,8 +62,6 @@ static const char *TAG = "services";
 #define TIME_SYNC_RETRY_MS 60000u
 #define WLED_PROVISION_INITIAL_RETRY_MS 60000u
 #define WLED_PROVISION_MAX_RETRY_MS     300000u
-#define WLED_PROBE_ATTEMPTS 3u
-#define WLED_PROBE_WAIT_MS  1500u
 #define WLED_LOCAL_ECHO_HOLD_MS 2500u
 #define WIFI_CONNECTED_BIT  BIT0
 #define WIFI_FAIL_BIT       BIT1
@@ -71,6 +69,14 @@ static const char *TAG = "services";
 typedef struct {
     char text[CMD_JSON_MAX];
 } cmd_msg_t;
+
+typedef struct {
+    uint32_t seq;
+    uint32_t delay_ms;
+    bool use_preset;
+    uint16_t preset_id;
+    led_state_t state;
+} delayed_power_cmd_t;
 
 static QueueHandle_t     s_cmd_q;
 static TaskHandle_t      s_cmd_task;
@@ -87,6 +93,8 @@ static EventGroupHandle_t s_wifi_events;
 static portMUX_TYPE s_bulk_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t s_bulk_network_users;
 static volatile uint32_t s_wled_local_echo_hold_until_ms;
+static volatile uint32_t s_power_request_seq;
+static bool s_suppress_next_led_publish;
 
 static services_status_t s_status = {
     .wifi_supported = WALLDISPLAY_HAS_WIFI_DRIVER,
@@ -133,9 +141,14 @@ static bool time_before_deadline(uint32_t now_ms, uint32_t deadline_ms)
     return deadline_ms && (int32_t)(deadline_ms - now_ms) > 0;
 }
 
+static void note_wled_local_echo_hold_for(uint32_t hold_ms)
+{
+    s_wled_local_echo_hold_until_ms = services_now_ms() + hold_ms;
+}
+
 static void note_wled_local_echo_hold(void)
 {
-    s_wled_local_echo_hold_until_ms = services_now_ms() + WLED_LOCAL_ECHO_HOLD_MS;
+    note_wled_local_echo_hold_for(WLED_LOCAL_ECHO_HOLD_MS);
 }
 
 static void time_sync_schedule_notify(void)
@@ -1399,6 +1412,119 @@ esp_err_t cmd_tx_send_json(const char *json)
     return ESP_OK;
 }
 
+static void cmd_tx_drain_pending(void)
+{
+    if (!s_cmd_q) return;
+    cmd_msg_t dropped;
+    while (xQueueReceive(s_cmd_q, &dropped, 0) == pdTRUE) {
+        status_note_rs485_drop();
+    }
+}
+
+static uint8_t pct_to_wled_bri(uint8_t pct);
+static esp_err_t publish_light_fields_to_wled(const led_state_t *state);
+
+static esp_err_t send_power_preset(uint16_t preset_id)
+{
+    char json[32];
+    snprintf(json, sizeof(json), "{\"ps\":%u}", (unsigned)preset_id);
+    return cmd_tx_send_json(json);
+}
+
+static esp_err_t send_power_wake_black(void)
+{
+    return cmd_tx_send_json("{\"on\":true,\"bri\":1,\"transition\":0,\"seg\":{\"col\":[[0,0,0,0],[0,0,0,0],[0,0,0,0]]}}");
+}
+
+static void delayed_power_cmd_task(void *arg)
+{
+    delayed_power_cmd_t *cmd = (delayed_power_cmd_t *)arg;
+    if (!cmd) {
+        vTaskDelete(NULL);
+        return;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(cmd->delay_ms));
+    if (cmd->seq == s_power_request_seq) {
+        esp_err_t err = cmd->use_preset
+            ? send_power_preset(cmd->preset_id)
+            : publish_light_fields_to_wled(&cmd->state);
+        if (err == ESP_OK) note_wled_local_echo_hold();
+    }
+
+    free(cmd);
+    vTaskDelete(NULL);
+}
+
+static esp_err_t schedule_delayed_power_cmd(uint32_t delay_ms, bool use_preset,
+                                            uint16_t preset_id, const led_state_t *state,
+                                            uint32_t seq)
+{
+    delayed_power_cmd_t *cmd = calloc(1, sizeof(*cmd));
+    if (!cmd) return ESP_ERR_NO_MEM;
+    cmd->seq = seq;
+    cmd->delay_ms = delay_ms;
+    cmd->use_preset = use_preset;
+    cmd->preset_id = preset_id;
+    if (state) cmd->state = *state;
+
+    BaseType_t ok = xTaskCreate(delayed_power_cmd_task, "pwr_delay", 3072, cmd, 5, NULL);
+    if (ok != pdPASS) {
+        free(cmd);
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+esp_err_t services_request_light_power(bool on, bool *used_preset)
+{
+    if (used_preset) *used_preset = false;
+    uint32_t seq = ++s_power_request_seq;
+
+    app_tuning_config_t cfg;
+    if (app_config_tuning_load(&cfg) != ESP_OK) app_config_tuning_defaults(&cfg);
+    uint16_t preset_id = on ? cfg.power_on_preset_id : cfg.power_off_preset_id;
+    bool use_preset = cfg.power_preset_mode_enabled && preset_id > 0;
+
+    led_state_t current;
+    led_state_get(&current);
+    bool turning_on = on && !current.power;
+
+    if (turning_on && cfg.power_on_delay_ms > 0) {
+        cmd_tx_drain_pending();
+        esp_err_t err = send_power_wake_black();
+        if (err == ESP_OK) note_wled_local_echo_hold_for((uint32_t)cfg.power_on_delay_ms + WLED_LOCAL_ECHO_HOLD_MS);
+
+        s_suppress_next_led_publish = true;
+        led_state_set_power(true);
+        s_suppress_next_led_publish = false;
+
+        led_state_t delayed_state;
+        led_state_get(&delayed_state);
+        esp_err_t sched_err = schedule_delayed_power_cmd(cfg.power_on_delay_ms, use_preset,
+                                                         preset_id, &delayed_state, seq);
+        if (sched_err != ESP_OK) {
+            sched_err = use_preset ? send_power_preset(preset_id) : publish_light_fields_to_wled(&delayed_state);
+        }
+        if (used_preset) *used_preset = use_preset;
+        return err == ESP_OK ? sched_err : err;
+    }
+
+    esp_err_t err = ESP_OK;
+    if (use_preset) {
+        cmd_tx_drain_pending();
+        err = send_power_preset(preset_id);
+        if (used_preset) *used_preset = true;
+    }
+
+    if (err == ESP_OK && use_preset) {
+        s_suppress_next_led_publish = true;
+    }
+    led_state_set_power(on);
+    s_suppress_next_led_publish = false;
+    return err;
+}
+
 static uint8_t pct_to_wled_bri(uint8_t pct)
 {
     if (pct > 100) pct = 100;
@@ -1454,7 +1580,7 @@ static esp_err_t publish_light_fields_to_wled(const led_state_t *state)
 {
     char json[128];
     snprintf(json, sizeof(json),
-             "{\"on\":%s,\"bri\":%u,\"transition\":7,\"seg\":[{\"id\":0,\"cct\":%u}]}",
+             "{\"on\":%s,\"bri\":%u,\"transition\":7,\"seg\":{\"cct\":%u}}",
              state->power ? "true" : "false",
              pct_to_wled_bri(state->brightness_pct),
              kelvin_to_wled_cct(state));
@@ -1470,7 +1596,7 @@ static esp_err_t publish_hue_fields_to_wled(const led_state_t *state)
 
     char json[112];
     snprintf(json, sizeof(json),
-             "{\"seg\":[{\"id\":0,\"col\":[[%u,%u,%u],[%u,%u,%u]]}]}",
+             "{\"seg\":{\"col\":[[%u,%u,%u],[%u,%u,%u]]}}",
              primary[0], primary[1], primary[2],
              secondary[0], secondary[1], secondary[2]);
     return cmd_tx_send_json(json);
@@ -1487,6 +1613,13 @@ static void publish_led_state_to_wled(const led_state_t *state, void *user)
     bool light_changed = !have_last || !led_light_fields_match(state, &last);
     bool hue_changed = !have_last || !led_hue_fields_match(state, &last);
     if (!light_changed && !hue_changed) return;
+
+    if (s_suppress_next_led_publish) {
+        last = *state;
+        have_last = true;
+        note_wled_local_echo_hold();
+        return;
+    }
 
     esp_err_t light_err = light_changed ? publish_light_fields_to_wled(state) : ESP_OK;
     esp_err_t hue_err = hue_changed ? publish_hue_fields_to_wled(state) : ESP_OK;
@@ -1627,13 +1760,6 @@ static bool wled_status_seen_within(uint32_t max_age_ms)
            (now_ms - st.wled_last_rx_ms) < max_age_ms;
 }
 
-static bool wled_recently_seen(void)
-{
-    app_tuning_config_t tuning;
-    if (app_config_tuning_load(&tuning) != ESP_OK) app_config_tuning_defaults(&tuning);
-    return wled_status_seen_within((uint32_t)tuning.wled_stale_s * 1000u);
-}
-
 static bool wled_wait_recently_seen(uint32_t timeout_ms)
 {
     TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
@@ -1642,16 +1768,6 @@ static bool wled_wait_recently_seen(uint32_t timeout_ms)
         vTaskDelay(pdMS_TO_TICKS(250));
     }
     return false;
-}
-
-static bool wled_probe_existing_link(void)
-{
-    for (uint8_t attempt = 0; attempt < WLED_PROBE_ATTEMPTS; attempt++) {
-        if (wled_recently_seen()) return true;
-        if (cmd_tx_is_ready()) (void)cmd_tx_send_json("{\"v\":true}");
-        if (wled_wait_recently_seen(WLED_PROBE_WAIT_MS)) return true;
-    }
-    return wled_recently_seen();
 }
 
 static bool provision_wait(uint32_t wait_ms)
@@ -1686,22 +1802,6 @@ static void provision_worker(void *arg)
         if (!cmd_tx_is_ready()) {
             if (provision_wait(1000)) force = true;
             continue;
-        }
-
-        if (!force && wled_recently_seen()) {
-            if (s_provision_force_requested) continue;
-            ESP_LOGI(TAG, "WLED already online; provisioning worker idle");
-            s_provision_task = NULL;
-            vTaskDelete(NULL);
-            return;
-        }
-
-        if (!force && wled_probe_existing_link()) {
-            if (s_provision_force_requested) continue;
-            ESP_LOGI(TAG, "WLED responded to startup probe; provisioning worker idle");
-            s_provision_task = NULL;
-            vTaskDelete(NULL);
-            return;
         }
 
         if (!read_wifi_creds(ssid, sizeof(ssid), psk, sizeof(psk))) {
