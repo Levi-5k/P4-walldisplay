@@ -7,7 +7,7 @@ It reads newline-delimited JSON from RS-485 and forwards it into WLED's existing
 - `{"v":true}` sends a compact `state` + `info` snapshot plus a root `presets` list back to the P4.
 - State JSON such as `{"on":true,"bri":128,"seg":[...]}` is applied with WLED's state deserializer.
 - Preset, playlist, and reboot JSON such as `{"ps":1}`, `{"psave":1,"n":"Evening"}`, `{"pdel":1}`, `{"np":true}`, `{"playlist":{...}}`, and `{"rb":true}` is also applied with WLED's state deserializer.
-- Config JSON such as `{"nw":...,"id":...,"if":...}` is applied with WLED's config deserializer when available.
+- Config JSON such as `{"nw":...,"id":...,"if":...,"um":...}` is applied with WLED's config deserializer when available.
 
 The P4 poll stream is treated as the link heartbeat. Once the bridge sees valid P4 JSON, it becomes request/response only and stops sending unsolicited periodic snapshots, which avoids half-duplex collisions with the P4's regular `{"v":true}` polls. If the P4 goes stale, the bridge falls back to quiet-bus reconnect announcements every 15 seconds. If the bridge boots but never sees an initial P4 frame, it periodically restarts the RS-485 UART/DE hardware instead of waiting forever for a USB-serial monitor reset. The bridge also drops stale partial lines, holds oversized lines until newline before reporting one error, and adds a small DE settle/hold delay around each transmit.
 
@@ -24,7 +24,7 @@ Default pins and power limits in the sample PlatformIO override target the Waves
 - Baud: `115200`
 - Onboard PSU relay: GPIO47, controlled by this usermod. Leave WLED's native Relay GPIO at `-1`; configure the PSU relay from the S3 WLED Usermods page under `86Box RS485 Bridge`.
 - LED data: GPIO1 on the SH1.0 connector by default; set LED GPIO, count, type, color order, and current limit on the S3 WLED page.
-- Audio Reactive: enabled with `USERMOD_AUDIOREACTIVE`.
+- Audio Reactive: enabled with `UM_AUDIOREACTIVE_ENABLE`.
 - Audio input: network receive only with `SR_DMTYPE=254`; the P4 sends WLED-MM audio-sync packets over UDP.
 - Auto brightness limiter: `ABL_MILLIAMPS_DEFAULT=5000` is the first-boot default; change it on the S3 WLED page to match the real PSU.
 

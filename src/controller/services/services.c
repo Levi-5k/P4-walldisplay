@@ -5,6 +5,7 @@
 #include "board_pins.h"
 #include "led_state.h"
 #include "sd_storage.h"
+#include "sound_sync_tx.h"
 #include "wled_state.h"
 #include "weather/weather_api.h"
 
@@ -1784,6 +1785,7 @@ static void provision_worker(void *arg)
     char ssid_json[70];
     char psk_json[140];
     char json[360];
+    char audio_json[220];
     uint32_t retry_ms = WLED_PROVISION_INITIAL_RETRY_MS;
     bool force = false;
 
@@ -1816,12 +1818,16 @@ static void provision_worker(void *arg)
         snprintf(json, sizeof(json),
                  "{\"nw\":{\"ins\":[{\"ssid\":\"%s\",\"psk\":\"%s\"}]},"
                  "\"id\":{\"mdns\":\"wled-86box\",\"name\":\"86Box LED\"},"
-                 "\"if\":{\"sync\":{\"recv\":true,\"port\":11988,\"group\":1}}}",
-                 ssid_json, psk_json);
+                  "\"if\":{\"sync\":{\"recv\":true,\"port\":%u,\"group\":%u}}}",
+                  ssid_json, psk_json, (unsigned)SOUND_SYNC_PORT, (unsigned)SOUND_SYNC_GROUP);
+           snprintf(audio_json, sizeof(audio_json),
+                  "{\"um\":{\"AudioReactive\":{\"on\":true,\"digitalmic\":{\"type\":254,\"pin\":[-1,-1,-1,-1]},\"sync\":{\"port\":%u,\"mode\":2}}}}",
+                  (unsigned)SOUND_SYNC_PORT);
 
             ESP_LOGI(TAG, "%s WLED provisioning config for SSID '%s'",
                  force ? "Force-sending" : "Sending", ssid);
         (void)cmd_tx_send_json(json);
+           (void)cmd_tx_send_json(audio_json);
         (void)cmd_tx_send_json("{\"v\":true}");
 
         if (wled_wait_recently_seen(8000)) {

@@ -120,21 +120,25 @@ These JSON keys must be accepted by the S3 bridge and forwarded into WLED's conf
 | `nw.ins[0].psk` | string, up to 64 chars from P4 storage | P4 Wi-Fi settings | Wi-Fi password for the S3 WLED node. |
 | `id.mdns` | string; currently `wled-86box` | P4 provisioning worker | mDNS name the P4 audio sender resolves as `wled-86box.local`. |
 | `id.name` | string; currently `86Box LED` | P4 provisioning worker | Friendly WLED device name. |
-| `if.sync.recv` | boolean; currently `true` | P4 provisioning worker | Enables WLED sync receive. |
-| `if.sync.port` | UDP port; currently `11988` | P4 provisioning worker | WLED-MM sound sync receive port; ignored by the non-audio WLED 16 branch. |
-| `if.sync.group` | integer; currently `1` | P4 provisioning worker | WLED-MM sync group; ignored by the non-audio WLED 16 branch. |
+| `if.sync.recv` | boolean; currently `true` | P4 provisioning worker | Enables WLED sync receive for AudioReactive network packets. |
+| `if.sync.port` | UDP port; currently `11988` | P4 provisioning worker | WLED-MM sound sync receive port used by AudioReactive. |
+| `if.sync.group` | integer; currently `1` | P4 provisioning worker | WLED-MM sync group; must match the P4 audio-sync sender. |
+| `um.AudioReactive.on` | boolean; currently `true` | P4 provisioning worker | Enables the AudioReactive usermod. |
+| `um.AudioReactive.digitalmic.type` | integer; currently `254` | P4 provisioning worker | Selects AudioReactive network-only receive mode, so no local microphone setup is required. |
+| `um.AudioReactive.digitalmic.pin[]` | four integers; currently all `-1` | P4 provisioning worker | Keeps local S3 I2S/MCLK microphone pins disabled. |
+| `um.AudioReactive.sync.port` | UDP port; currently `11988` | P4 provisioning worker | AudioReactive UDP sound-sync receive port. |
+| `um.AudioReactive.sync.mode` | integer bitfield; currently `2` | P4 provisioning worker | Enables AudioReactive UDP receive mode without transmit. |
 
-Current provisioning payload shape:
+Current provisioning payload shapes. The AudioReactive settings are sent as a separate small RS-485 frame so the Wi-Fi credential frame stays below the P4 transmit limit:
 
 ```json
 {"nw":{"ins":[{"ssid":"<ssid>","psk":"<psk>"}]},"id":{"mdns":"wled-86box","name":"86Box LED"},"if":{"sync":{"recv":true,"port":11988,"group":1}}}
+{"um":{"AudioReactive":{"on":true,"digitalmic":{"type":254,"pin":[-1,-1,-1,-1]},"sync":{"port":11988,"mode":2}}}}
 ```
 
 ## Audio Sync From P4
 
-Audio sync is UDP, not RS-485 JSON. On the normal MoonModules branch, the S3 firmware must use WLED-MM/MoonModules with `USERMOD_AUDIOREACTIVE` enabled.
-
-The `wled-16-non-audio` branch intentionally targets official WLED `v16.0.0` without AudioReactive. RS-485 control, presets, and bridge diagnostics still apply, but P4 audio-sync packets are ignored by that firmware.
+Audio sync is UDP, not RS-485 JSON. The S3 firmware targets official WLED `v16.0.1` with the AudioReactive usermod compiled in and configured for network-only receive mode (`SR_DMTYPE=254`). The P4 also provisions the persisted AudioReactive usermod config (`on:true`, `digitalmic.type:254`, sync port `11988`, sync mode `2`) so audio-reactive effects work after flashing without opening the WLED usermod settings page. The P4 sends WLED-MM packets to the S3; the S3 does not use a local microphone.
 
 | Parameter | Current value | Purpose |
 | --- | --- | --- |
@@ -209,13 +213,13 @@ These are not runtime settings the P4 changes over RS-485. The board-level items
 | `board_build.arduino.memory_type` | `qio_opi` via local board file | Matches external QIO flash plus OPI PSRAM assumption for ESP32-S3R8-class hardware. |
 | `board_upload.flash_size` / partitions | `16MB`, `${esp32.extreme_partitions}` | Confirm OTA/filesystem layout is acceptable before production flashing. |
 | `upload_speed` | `460800` | Stable USB flashing speed for the Waveshare S3 relay board; 921600 has dropped during app writes on this hardware. |
-| `custom_usermods` | `86box_rs485_bridge` | WLED 16 dynamic usermod loader; AudioReactive is intentionally omitted on this branch. |
+| `custom_usermods` | `audioreactive`, `86box_rs485_bridge` | WLED 16 dynamic usermod loader; keep both usermods so UDP audio sync and the RS-485/relay bridge are present. |
 | `USERMOD_86BOX_RS485_UART` | `1` | S3 UART connected to RS-485 transceiver. |
 | `USERMOD_86BOX_RS485_TX` | `17` | S3 UART TX GPIO. |
 | `USERMOD_86BOX_RS485_RX` | `18` | S3 UART RX GPIO. |
 | `USERMOD_86BOX_RS485_DE` | `21` | GPIO21 is labeled RS485 EN on the provided pinout. |
 | `USERMOD_86BOX_RS485_BAUD` | `115200` | Must match P4 `BSP_RS485_BAUD`. |
-| `ARDUINO_USB_CDC_ON_BOOT` | `0` | Keep the S3 WLED app headless; enabling CDC-on-boot can make startup depend on opening a USB serial monitor. |
+| `ARDUINO_USB_CDC_ON_BOOT` | `1` | Enables direct USB serial logs on the Waveshare S3 while retaining the separate RS-485 control UART. |
 | `LEDPIN` / `DATA_PINS` | `1` | First-boot LED output GPIO; WLED web field maps to `hw.led.ins[0].pin`. |
 | `PIXEL_COUNTS` | `300` | First-boot LED count; WLED web field maps to `hw.led.ins[0].len`. |
 | `PIXEL_TYPE` | WLED default unless overridden | Set LED chipset/type on the WLED web page; config maps to `hw.led.ins[0].type`. |
@@ -228,7 +232,9 @@ These are not runtime settings the P4 changes over RS-485. The board-level items
 | `USERMOD_86BOX_PSU_RELAY_ON_LEAD_MS` | `750` | S3-side relay lead time for normal preset/color commands. Explicit P4 black warm-up commands (`on:true`, `bri<=1`, black `seg.col`, `transition:0`) force WLED globally dark without changing saved segment colors, repeatedly clock black frames, then energize the relay while continuing to clock black frames through the relay lead time. |
 | `USERMOD_86BOX_PSU_RELAY_OFF_HOLD_MS` | `10000` | Time to keep the PSU energized after WLED output reaches off. |
 | `USERMOD_86BOX_PSU_RELAY_MIN_CYCLE_MS` | `1500` | Minimum interval between relay output transitions to avoid chatter. |
-| I2S audio pins | `-1` | Disabled to avoid conflicts with relay GPIO47 and unused mic pins. |
+| `UM_AUDIOREACTIVE_ENABLE` | defined | Compiles WLED AudioReactive into the official WLED 16 build. |
+| `SR_DMTYPE` | `254` | AudioReactive network-only receive mode; no local ADC/I2S microphone is initialized. |
+| I2S audio pins | `-1` | Disabled because audio data arrives from the P4 over WLED-MM UDP packets. |
 | `WLED_RELEASE_NAME` | `86Box-S3-Waveshare-Relay1CH` | Cosmetic build name shown by WLED. |
 
 The practical setup flow is: flash this S3 firmware, join the WLED page, open Settings > LED Preferences, then set LED output GPIO, LED type, color order, LED count, and current limit. Leave the native WLED Relay GPIO at `-1`. Open the Usermods page and adjust `86Box RS485 Bridge` PSU relay settings only if the GPIO, active level, lead time, hold time, or minimum cycle time need to change. Those values are saved in WLED config and should survive normal reboots without rebuilding.

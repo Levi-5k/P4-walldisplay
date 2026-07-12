@@ -44,8 +44,8 @@ chmod +x "$upstream_dir/esptool.py"
 cat <<'MSG'
 Overlay files copied.
 
-This WLED 16 non-audio overlay uses custom_usermods and REGISTER_USERMOD, so no
-manual wled00/usermods_list.cpp edit is needed.
+This WLED 16 overlay uses custom_usermods and REGISTER_USERMOD for AudioReactive
+and the 86Box bridge, so no manual wled00/usermods_list.cpp edit is needed.
 
 Then build from the upstream checkout:
 

@@ -596,7 +596,8 @@ private:
   {
     return root.containsKey(F("nw")) ||
            root.containsKey(F("id")) ||
-           root.containsKey(F("if"));
+           root.containsKey(F("if")) ||
+           root.containsKey(F("um"));
   }
 
   static bool hasNetworkCredentials(JsonObject root)
