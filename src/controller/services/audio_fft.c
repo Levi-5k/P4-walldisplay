@@ -88,23 +88,14 @@ static void compute_fft(const int16_t *samples, audio_fft_result_t *out)
     dsps_fft2r_fc32(s_fft_buf, FFT_SIZE);
     dsps_bit_rev_fc32(s_fft_buf, FFT_SIZE);
 
-    float total_mag = 0.0f;
-    float major_peak_mag = 0.0f;
-    int major_peak_bin = 0;
-
     for (int i = 0; i < FFT_SIZE / 2; i++) {
         float re = s_fft_buf[i * 2];
         float im = s_fft_buf[i * 2 + 1];
         s_magnitudes[i] = sqrtf(re * re + im * im);
-        total_mag += s_magnitudes[i];
-        if (s_magnitudes[i] > major_peak_mag) {
-            major_peak_mag = s_magnitudes[i];
-            major_peak_bin = i;
-        }
     }
 
-    out->fft_magnitude = total_mag / (float)(FFT_SIZE / 2);
-    out->fft_major_peak = (float)major_peak_bin * (float)AUDIO_IN_SAMPLE_RATE / (float)FFT_SIZE;
+    float dominant_scaled = 0.0f;
+    uint8_t dominant_band = 1;
 
     for (int b = 0; b < FFT_BINS; b++) {
         float bin_sum = 0.0f;
@@ -119,7 +110,17 @@ static void compute_fft(const int16_t *samples, audio_fft_result_t *out)
         if (scaled < 0.0f) scaled = 0.0f;
         if (scaled > 255.0f) scaled = 255.0f;
         out->bin[b] = (uint8_t)scaled;
+        if (b > 0 && scaled > dominant_scaled) {
+            dominant_scaled = scaled;
+            dominant_band = (uint8_t)b;
+        }
     }
+
+    uint16_t dominant_start = BIN_EDGES[dominant_band];
+    uint16_t dominant_stop = BIN_EDGES[dominant_band + 1] - 1;
+    float dominant_center = ((float)dominant_start + (float)dominant_stop) * 0.5f;
+    out->fft_major_peak = dominant_center * (float)AUDIO_IN_SAMPLE_RATE / (float)FFT_SIZE;
+    out->fft_magnitude = fminf(dominant_scaled * 8.0f, 1020.0f);
 
     s_smooth_level = s_smooth_level * (1.0f - SMOOTH_ALPHA) + out->sample_raw * SMOOTH_ALPHA;
     out->sample_smooth = s_smooth_level;

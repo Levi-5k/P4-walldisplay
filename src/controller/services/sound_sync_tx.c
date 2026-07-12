@@ -11,13 +11,13 @@
 
 static const char *TAG = "sound_sync";
 
-#define WLED_MDNS_NAME      "wled-86box.local"
+#define WLED_MM_MULTICAST_ADDR_HOST_ORDER 0xEF000001u /* 239.0.0.1 */
 #define MIN_SEND_INTERVAL_US 22000
 
 static int s_sock = -1;
 static struct sockaddr_in s_dest;
 static bool s_ready;
-static bool s_dest_resolved;
+static bool s_dest_configured;
 static uint64_t s_last_send_us;
 static uint8_t s_frame_counter;
 
@@ -54,39 +54,18 @@ _Static_assert(sizeof(wled_audio_sync_packet_t) == PACKET_SIZE_ACTUAL,
 
 bool sound_sync_tx_is_ready(void)
 {
-    return s_ready && s_dest_resolved;
+    return s_ready && s_dest_configured;
 }
 
-static bool resolve_destination(void)
+static void configure_destination(void)
 {
-    if (s_dest_resolved) return true;
+    if (s_dest_configured) return;
 
-    services_status_t status;
-    if (services_status_get(&status) != ESP_OK || !status.wifi_connected) return false;
-
-    struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_DGRAM };
-    struct addrinfo *res = NULL;
-
-    if (getaddrinfo(WLED_MDNS_NAME, NULL, &hints, &res) == 0 && res) {
-        struct sockaddr_in *addr = (struct sockaddr_in *)res->ai_addr;
-        s_dest.sin_family = AF_INET;
-        s_dest.sin_port = htons(SOUND_SYNC_PORT);
-        s_dest.sin_addr = addr->sin_addr;
-        freeaddrinfo(res);
-        s_dest_resolved = true;
-        ESP_LOGI(TAG, "Resolved %s -> %s:%d",
-                 WLED_MDNS_NAME, inet_ntoa(s_dest.sin_addr), SOUND_SYNC_PORT);
-        return true;
-    }
-    if (res) freeaddrinfo(res);
-
-    /* Fallback: broadcast on the Sound Sync port */
     s_dest.sin_family = AF_INET;
     s_dest.sin_port = htons(SOUND_SYNC_PORT);
-    s_dest.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-    s_dest_resolved = true;
-    ESP_LOGW(TAG, "mDNS resolve failed; broadcasting to port %d", SOUND_SYNC_PORT);
-    return true;
+    s_dest.sin_addr.s_addr = htonl(WLED_MM_MULTICAST_ADDR_HOST_ORDER);
+    s_dest_configured = true;
+    ESP_LOGI(TAG, "Sound Sync target %s:%d", inet_ntoa(s_dest.sin_addr), SOUND_SYNC_PORT);
 }
 
 static void on_fft_result(const audio_fft_result_t *result, void *user)
@@ -98,7 +77,7 @@ static void on_fft_result(const audio_fft_result_t *result, void *user)
     uint64_t now_us = esp_timer_get_time();
     if (now_us - s_last_send_us < MIN_SEND_INTERVAL_US) return;
 
-    if (!s_dest_resolved && !resolve_destination()) return;
+    if (!s_dest_configured) configure_destination();
 
     wled_audio_sync_packet_t pkt = {0};
     memcpy(pkt.header, "00002", sizeof(pkt.header));
@@ -132,8 +111,8 @@ esp_err_t sound_sync_tx_start(void)
         return ESP_FAIL;
     }
 
-    int broadcast = 1;
-    setsockopt(s_sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+    uint8_t multicast_ttl = 1;
+    setsockopt(s_sock, IPPROTO_IP, IP_MULTICAST_TTL, &multicast_ttl, sizeof(multicast_ttl));
 
     struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 };
     setsockopt(s_sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
@@ -146,9 +125,10 @@ esp_err_t sound_sync_tx_start(void)
         return err;
     }
 
-    resolve_destination();
+    configure_destination();
 
     s_ready = true;
-    ESP_LOGI(TAG, "Sound Sync TX ready -> port %d @ ~43 Hz", SOUND_SYNC_PORT);
+    ESP_LOGI(TAG, "Sound Sync TX ready -> %s:%d @ ~43 Hz",
+             inet_ntoa(s_dest.sin_addr), SOUND_SYNC_PORT);
     return ESP_OK;
 }

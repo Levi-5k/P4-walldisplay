@@ -142,7 +142,7 @@ Audio sync is UDP, not RS-485 JSON. The S3 firmware targets official WLED `v16.0
 
 | Parameter | Current value | Purpose |
 | --- | --- | --- |
-| Destination host | `wled-86box.local`, fallback broadcast | Target for P4 audio-sync packets. |
+| Destination host | multicast `239.0.0.1` | Target for WLED AudioReactive UDP receive sockets. |
 | UDP port | `11988` | WLED-MM audio-sync receive port. |
 | Sync group | `1` | Must match WLED sync config. |
 | Send interval | at least 22 ms between packets | About 43 packets per second. |

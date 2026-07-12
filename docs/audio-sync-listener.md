@@ -32,6 +32,4 @@ The expected packet format is the 44-byte WLED-MM v2 `audioSyncPacket`:
 
 ## Network Caveat
 
-The current firmware first tries to resolve `wled-86box.local` and sends directly to that WLED node. If that mDNS lookup succeeds, packets are unicast to the WLED device and a separate Mac listener will not normally see them. If mDNS resolution fails, the P4 falls back to UDP broadcast and this script can receive the stream from any host on the same Wi-Fi/VLAN.
-
-If the script shows no packets while WLED AudioReactive is working, the P4 is probably unicasting to WLED. For side-by-side debugging, add a temporary firmware option to broadcast or mirror the sound-sync packets while the listener runs.
+The current firmware sends packets to the WLED AudioReactive multicast group `239.0.0.1` on port `11988`. A side-by-side listener must join that multicast group; plain UDP broadcast listeners will not see the stream.

@@ -21,7 +21,7 @@
 #include "esp_psram.h"
 #include "esp_log.h"
 #include "esp_private/esp_clk.h"
-#include "board_pins.h"
+#include "bsp/esp32_p4_wifi6_touch_lcd_4b.h"
 #include "ui/ui_init.h"
 #include "services/services.h"
 #include "services/audio_out.h"
@@ -93,6 +93,11 @@ void app_main(void)
     /* Now that BSP is up, push the persisted display brightness. */
     led_state_apply_display_brightness();
     backlight_manager_init();
+
+    esp_err_t usb_host_err = bsp_usb_host_start(BSP_USB_HOST_POWER_MODE_USB_DEV, false);
+    if (usb_host_err != ESP_OK) {
+        ESP_LOGW(TAG, "USB host init failed: %s", esp_err_to_name(usb_host_err));
+    }
 
     /* Background services. Each init is non-fatal: missing Wi-Fi/weather
      * config should degrade the UI status, not crash the panel. */

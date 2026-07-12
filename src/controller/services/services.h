@@ -111,7 +111,7 @@ esp_err_t audio_in_init(void);
 /* FFT/loudness post-processing on captured audio. */
 esp_err_t audio_fft_init(void);
 
-/* UDP broadcast of normalized audio levels to WLED nodes. */
+/* UDP multicast of normalized audio levels to WLED AudioReactive nodes. */
 esp_err_t sound_sync_tx_init(void);
 
 /* Boot-time WLED provisioning over RS-485. */
